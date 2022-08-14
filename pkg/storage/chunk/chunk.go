@@ -234,42 +234,51 @@ func (c *Chunk) EncodeTo(buf *bytes.Buffer) error {
 	if buf == nil {
 		buf = bytes.NewBuffer(nil)
 	}
-	// Write 4 empty bytes first - we will come back and put the len in here.
-	metadataLenBytes := [4]byte{}
-	if _, err := buf.Write(metadataLenBytes[:]); err != nil {
-		return err
+
+	switch c.Encoding {
+	case ParquetChunk:
+		// The entire chunk data becomes the chunk for Parquet files
+		if err := c.Data.Marshal(buf); err != nil {
+			return err
+		}
+	default:
+		// Write 4 empty bytes first - we will come back and put the len in here.
+		metadataLenBytes := [4]byte{}
+		if _, err := buf.Write(metadataLenBytes[:]); err != nil {
+			return err
+		}
+
+		// Encode chunk metadata into snappy-compressed buffer
+		writer := writerPool.Get().(*snappy.Writer)
+		defer writerPool.Put(writer)
+		writer.Reset(buf)
+		json := jsoniter.ConfigFastest
+		if err := json.NewEncoder(writer).Encode(c); err != nil {
+			return err
+		}
+		writer.Close()
+
+		// Write the metadata length back at the start of the buffer.
+		// (note this length includes the 4 bytes for the length itself)
+		metadataLen := buf.Len()
+		binary.BigEndian.PutUint32(metadataLenBytes[:], uint32(metadataLen))
+		copy(buf.Bytes(), metadataLenBytes[:])
+
+		// Write another 4 empty bytes - we will come back and put the len in here.
+		dataLenBytes := [4]byte{}
+		if _, err := buf.Write(dataLenBytes[:]); err != nil {
+			return err
+		}
+
+		// And now the chunk data
+		if err := c.Data.Marshal(buf); err != nil {
+			return err
+		}
+
+		// Now write the data len back into the buf.
+		binary.BigEndian.PutUint32(dataLenBytes[:], uint32(buf.Len()-metadataLen-4))
+		copy(buf.Bytes()[metadataLen:], dataLenBytes[:])
 	}
-
-	// Encode chunk metadata into snappy-compressed buffer
-	writer := writerPool.Get().(*snappy.Writer)
-	defer writerPool.Put(writer)
-	writer.Reset(buf)
-	json := jsoniter.ConfigFastest
-	if err := json.NewEncoder(writer).Encode(c); err != nil {
-		return err
-	}
-	writer.Close()
-
-	// Write the metadata length back at the start of the buffer.
-	// (note this length includes the 4 bytes for the length itself)
-	metadataLen := buf.Len()
-	binary.BigEndian.PutUint32(metadataLenBytes[:], uint32(metadataLen))
-	copy(buf.Bytes(), metadataLenBytes[:])
-
-	// Write another 4 empty bytes - we will come back and put the len in here.
-	dataLenBytes := [4]byte{}
-	if _, err := buf.Write(dataLenBytes[:]); err != nil {
-		return err
-	}
-
-	// And now the chunk data
-	if err := c.Data.Marshal(buf); err != nil {
-		return err
-	}
-
-	// Now write the data len back into the buf.
-	binary.BigEndian.PutUint32(dataLenBytes[:], uint32(buf.Len()-metadataLen-4))
-	copy(buf.Bytes()[metadataLen:], dataLenBytes[:])
 
 	// Now work out the checksum
 	c.encoded = buf.Bytes()
@@ -310,10 +319,27 @@ func (c *Chunk) Decode(decodeContext *DecodeContext, input []byte) error {
 
 	// Now unmarshal the chunk metadata.
 	r := bytes.NewReader(input)
+
 	var metadataLen uint32
 	if err := binary.Read(r, binary.BigEndian, &metadataLen); err != nil {
 		return errors.Wrap(err, "when reading metadata length from chunk")
 	}
+
+	// The first 4 bytes can be the metadata length for cortex chunks but also the magic number if it's a parquet file
+	if uint32('P')<<24|uint32('A')<<16|uint32('R')<<8|uint32('1') == metadataLen {
+		// TODO check the last 4 bytes too to make sure there isn't an accidental collision on the metadata length for
+		// for a cortex file accidentally being PAR1
+
+		// The encoding isn't stored in the chunk for Parquet files so we specify it here.
+		var err error
+		c.Data, err = NewForEncoding(ParquetChunk)
+		if err != nil {
+			return err
+		}
+		// For parquet files, the entire file is unmarshalled
+		return c.Data.UnmarshalFromBuf(input)
+	}
+
 	var tempMetadata Chunk
 	decodeContext.reader.Reset(r)
 	json := jsoniter.ConfigFastest

@@ -1,6 +1,7 @@
 package chunkenc
 
 import (
+	"github.com/pkg/errors"
 	"io"
 
 	"github.com/prometheus/common/model"
@@ -18,10 +19,19 @@ const LogChunk = chunk.Encoding(129)
 
 func init() {
 	chunk.MustRegisterEncoding(GzipLogChunk, "GzipLogChunk", func() chunk.Data {
-		return &Facade{}
+		return &Facade{
+			encoding: GzipLogChunk,
+		}
 	})
 	chunk.MustRegisterEncoding(LogChunk, "LogChunk", func() chunk.Data {
-		return &Facade{}
+		return &Facade{
+			encoding: LogChunk,
+		}
+	})
+	chunk.MustRegisterEncoding(chunk.ParquetChunk, "ParquetChunk", func() chunk.Data {
+		return &Facade{
+			encoding: chunk.ParquetChunk,
+		}
 	})
 }
 
@@ -30,6 +40,7 @@ type Facade struct {
 	c          Chunk
 	blockSize  int
 	targetSize int
+	encoding   chunk.Encoding
 	chunk.Data
 }
 
@@ -39,6 +50,8 @@ func NewFacade(c Chunk, blockSize, targetSize int) chunk.Data {
 		c:          c,
 		blockSize:  blockSize,
 		targetSize: targetSize,
+		// TODO does this need to be configurable? Who calls this method?
+		encoding: LogChunk,
 	}
 }
 
@@ -47,22 +60,44 @@ func (f Facade) Marshal(w io.Writer) error {
 	if f.c == nil {
 		return nil
 	}
-	if _, err := f.c.WriteTo(w); err != nil {
-		return err
+	switch f.encoding {
+	case GzipLogChunk:
+		if _, err := f.c.WriteTo(w); err != nil {
+			return err
+		}
+	case LogChunk:
+		if _, err := f.c.WriteTo(w); err != nil {
+			return err
+		}
+	case chunk.ParquetChunk:
+		if err := writeParquet(w, f.c); err != nil {
+			return err
+		}
 	}
+
 	return nil
 }
 
 // UnmarshalFromBuf implements chunk.Chunk.
 func (f *Facade) UnmarshalFromBuf(buf []byte) error {
 	var err error
-	f.c, err = NewByteChunk(buf, f.blockSize, f.targetSize)
+	switch f.encoding {
+	case GzipLogChunk:
+		f.c, err = NewByteChunk(buf, f.blockSize, f.targetSize)
+	case LogChunk:
+		f.c, err = NewByteChunk(buf, f.blockSize, f.targetSize)
+	case chunk.ParquetChunk:
+		f.c, err = NewParquetChunk(buf, f.blockSize, f.targetSize)
+	default:
+		return errors.Errorf("cannot unmarshal unknown chunk encoding: %v", f.encoding)
+	}
+
 	return err
 }
 
 // Encoding implements chunk.Chunk.
-func (Facade) Encoding() chunk.Encoding {
-	return LogChunk
+func (f Facade) Encoding() chunk.Encoding {
+	return f.encoding
 }
 
 // Utilization implements encoding.Chunk.
@@ -109,7 +144,8 @@ func (f Facade) Rebound(start, end model.Time, filter filter.Func) (chunk.Data, 
 		return nil, err
 	}
 	return &Facade{
-		c: newChunk,
+		c:        newChunk,
+		encoding: f.encoding,
 	}, nil
 }
 
