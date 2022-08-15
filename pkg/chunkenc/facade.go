@@ -2,6 +2,7 @@ package chunkenc
 
 import (
 	"github.com/pkg/errors"
+	"github.com/prometheus/prometheus/model/labels"
 	"io"
 
 	"github.com/prometheus/common/model"
@@ -41,6 +42,7 @@ type Facade struct {
 	blockSize  int
 	targetSize int
 	encoding   chunk.Encoding
+	labels     labels.Labels
 	chunk.Data
 }
 
@@ -52,6 +54,16 @@ func NewFacade(c Chunk, blockSize, targetSize int) chunk.Data {
 		targetSize: targetSize,
 		// TODO does this need to be configurable? Who calls this method?
 		encoding: LogChunk,
+	}
+}
+
+func NewFlushFacade(c Chunk, blockSize, targetSize int, encoding chunk.Encoding, labels labels.Labels) chunk.Data {
+	return &Facade{
+		c:          c,
+		blockSize:  blockSize,
+		targetSize: targetSize,
+		encoding:   encoding,
+		labels:     labels,
 	}
 }
 
@@ -70,7 +82,7 @@ func (f Facade) Marshal(w io.Writer) error {
 			return err
 		}
 	case chunk.ParquetChunk:
-		if err := writeParquet(w, f.c); err != nil {
+		if err := writeParquet(w, f.c, f.labels); err != nil {
 			return err
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"github.com/grafana/loki/pkg/logproto"
 	"github.com/grafana/loki/pkg/logql/log"
 	"github.com/grafana/loki/pkg/util/filter"
+	"github.com/prometheus/prometheus/model/labels"
 	parquet "github.com/segmentio/parquet-go"
 	"io"
 	"time"
@@ -17,8 +18,8 @@ Need to write the file from the chunk
 */
 
 type LokiBaseRowType struct {
-	timestamp time.Time
-	entry     string
+	Timestamp int64  `parquet:",delta"`
+	Entry     string `parquet:",snappy"`
 }
 
 type parquetChunk struct {
@@ -114,7 +115,7 @@ func (parquetChunk) Rebound(start, end time.Time, filter filter.Func) (Chunk, er
 	panic("implement me")
 }
 
-func writeParquet(w io.Writer, c Chunk) error {
+func writeParquet(w io.Writer, c Chunk, labels labels.Labels) error {
 
 	// Define the schema
 	// Metadata
@@ -122,24 +123,36 @@ func writeParquet(w io.Writer, c Chunk) error {
 	// - labels for the stream
 	// - block data?
 	vers := parquet.KeyValueMetadata("version", "1")
-	lbls := parquet.KeyValueMetadata("labels", "FIXME")
-	pw := parquet.NewGenericWriter[LokiBaseRowType](w, vers, lbls)
+	lbls := parquet.KeyValueMetadata("labels", labels.String())
+	schema := parquet.SchemaOf(new(LokiBaseRowType))
+	pw := parquet.NewGenericWriter[LokiBaseRowType](w, schema, vers, lbls)
 	defer pw.Close()
 
 	// Write the blocks
 	blocks := c.Blocks(c.Bounds())
 	for _, b := range blocks {
-		itr := b.Iterator(context.Background(), nil)
+		itr := b.Iterator(context.Background(), noopStreamPipeline)
+		//TODO This should batch write instead of doing one entry at a time.
 		for itr.Next() {
-			pw.Write([]LokiBaseRowType{
+			_, err := pw.Write([]LokiBaseRowType{
 				{
-					timestamp: itr.Entry().Timestamp,
-					entry:     itr.Entry().Line,
+					Timestamp: itr.Entry().Timestamp.UnixNano(),
+					Entry:     itr.Entry().Line,
 				},
 			})
+			if err != nil {
+				return err
+			}
+		}
+		err := itr.Close()
+		if err != nil {
+			return err
 		}
 		// Calling flush will create a row group, we are mapping a block to a row group
-		pw.Flush()
+		err = pw.Flush()
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
