@@ -57,6 +57,12 @@ type Data interface {
 	// Entries returns the number of entries in a chunk
 	Entries() int
 	Utilization() float64
+	// TODO this is kind of a mess, we have to detect and unmarshal the Parquet file from the cortex chunk
+	// and we need to decode the parquet file to find and set the labels on the cortex chunk
+	// we can't directly dereference the internal parquetchunk from the cortex chunk because it creates an import cycle
+	// and we can't really move the parquetchunk because that also creates an import cycle
+	// so to work around this i'm adding this method to the data interface.
+	Labels() labels.Labels
 }
 
 // RequestChunkFilterer creates ChunkFilterer for a given request context.

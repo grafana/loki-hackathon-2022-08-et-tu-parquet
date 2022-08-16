@@ -42,8 +42,8 @@ const (
 	Bigchunk Encoding = iota
 )
 
-// ParquetChunk is an encoding type for Parquet files
-const ParquetChunk = Encoding(130)
+// Parquet is an encoding type for Parquet files
+const Parquet = Encoding(130)
 
 type encoding struct {
 	Name string

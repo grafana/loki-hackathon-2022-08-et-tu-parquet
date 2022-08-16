@@ -296,7 +296,7 @@ func (i *Ingester) flushChunks(ctx context.Context, fp model.Fingerprint, labelP
 		ch := chunk.NewChunk(
 			userID, fp, metric,
 			// TODO where do we configure the chunk format? Do we reuse the existing encoding which will be kind of a weird overloading but possible?
-			chunkenc.NewFlushFacade(c.chunk, i.cfg.BlockSize, i.cfg.TargetChunkSize, chunk.ParquetChunk, metric),
+			chunkenc.NewFlushFacade(c.chunk, i.cfg.BlockSize, i.cfg.TargetChunkSize, chunk.Parquet, metric),
 			firstTime,
 			lastTime,
 		)

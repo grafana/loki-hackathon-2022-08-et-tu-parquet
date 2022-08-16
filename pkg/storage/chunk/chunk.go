@@ -236,7 +236,7 @@ func (c *Chunk) EncodeTo(buf *bytes.Buffer) error {
 	}
 
 	switch c.Encoding {
-	case ParquetChunk:
+	case Parquet:
 		// The entire chunk data becomes the chunk for Parquet files
 		if err := c.Data.Marshal(buf); err != nil {
 			return err
@@ -332,12 +332,17 @@ func (c *Chunk) Decode(decodeContext *DecodeContext, input []byte) error {
 
 		// The encoding isn't stored in the chunk for Parquet files so we specify it here.
 		var err error
-		c.Data, err = NewForEncoding(ParquetChunk)
+		c.Data, err = NewForEncoding(Parquet)
 		if err != nil {
 			return err
 		}
 		// For parquet files, the entire file is unmarshalled
-		return c.Data.UnmarshalFromBuf(input)
+		err = c.Data.UnmarshalFromBuf(input)
+		if err != nil {
+			return err
+		}
+		c.Metric = c.Data.Labels()
+		return nil
 	}
 
 	var tempMetadata Chunk

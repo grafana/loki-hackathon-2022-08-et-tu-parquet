@@ -29,9 +29,9 @@ func init() {
 			encoding: LogChunk,
 		}
 	})
-	chunk.MustRegisterEncoding(chunk.ParquetChunk, "ParquetChunk", func() chunk.Data {
+	chunk.MustRegisterEncoding(chunk.Parquet, "Parquet", func() chunk.Data {
 		return &Facade{
-			encoding: chunk.ParquetChunk,
+			encoding: chunk.Parquet,
 		}
 	})
 }
@@ -81,12 +81,11 @@ func (f Facade) Marshal(w io.Writer) error {
 		if _, err := f.c.WriteTo(w); err != nil {
 			return err
 		}
-	case chunk.ParquetChunk:
+	case chunk.Parquet:
 		if err := writeParquet(w, f.c, f.labels); err != nil {
 			return err
 		}
 	}
-
 	return nil
 }
 
@@ -98,8 +97,11 @@ func (f *Facade) UnmarshalFromBuf(buf []byte) error {
 		f.c, err = NewByteChunk(buf, f.blockSize, f.targetSize)
 	case LogChunk:
 		f.c, err = NewByteChunk(buf, f.blockSize, f.targetSize)
-	case chunk.ParquetChunk:
-		f.c, err = NewParquetChunk(buf, f.blockSize, f.targetSize)
+	case chunk.Parquet:
+		var pc *ParquetChunk
+		pc, err = NewParquetChunk(buf)
+		f.labels = pc.Labels()
+		f.c = pc
 	default:
 		return errors.Errorf("cannot unmarshal unknown chunk encoding: %v", f.encoding)
 	}
@@ -170,4 +172,8 @@ func UncompressedSize(c chunk.Data) (int, bool) {
 	}
 
 	return f.c.UncompressedSize(), true
+}
+
+func (f Facade) Labels() labels.Labels {
+	return f.labels
 }

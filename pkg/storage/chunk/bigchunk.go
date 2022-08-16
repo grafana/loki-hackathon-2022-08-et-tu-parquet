@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"github.com/prometheus/prometheus/model/labels"
 	"io"
 
 	"github.com/prometheus/common/model"
@@ -182,6 +183,10 @@ func (b *bigchunk) Size() int {
 		sum += len(c.Bytes())
 	}
 	return sum
+}
+
+func (b *bigchunk) Labels() labels.Labels {
+	return labels.Labels{}
 }
 
 func (b *bigchunk) Slice(start, end model.Time) Data {

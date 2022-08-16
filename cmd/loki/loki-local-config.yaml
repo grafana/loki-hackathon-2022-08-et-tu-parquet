@@ -16,6 +16,10 @@ common:
     kvstore:
       store: inmemory
 
+ingester:
+  wal:
+    enabled: false
+
 query_range:
   results_cache:
     cache:

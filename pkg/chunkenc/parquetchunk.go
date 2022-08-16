@@ -1,116 +1,227 @@
 package chunkenc
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"github.com/grafana/loki/pkg/iter"
 	"github.com/grafana/loki/pkg/logproto"
 	"github.com/grafana/loki/pkg/logql/log"
+	"github.com/grafana/loki/pkg/logqlmodel/stats"
+	"github.com/grafana/loki/pkg/storage/chunk"
 	"github.com/grafana/loki/pkg/util/filter"
+	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/model/labels"
-	parquet "github.com/segmentio/parquet-go"
+	"github.com/segmentio/parquet-go"
 	"io"
+	"math"
+	"strconv"
 	"time"
 )
-
-/*
-Need to create blocks or an equivalent for reads
-Need to write the file from the chunk
-*/
 
 type LokiBaseRowType struct {
 	Timestamp int64  `parquet:",delta"`
 	Entry     string `parquet:",snappy"`
 }
 
-type parquetChunk struct {
+type ParquetChunk struct {
+	parquetFile *parquet.File
+	blocks      []parquetBlock
+	labels      labels.Labels
 }
 
-func NewParquetChunk(b []byte, blockSize, targetSize int) (*parquetChunk, error) {
+func NewParquetChunk(b []byte) (*ParquetChunk, error) {
+	pf, err := parquet.OpenFile(bytes.NewReader(b), int64(len(b)))
+	if err != nil {
+		return nil, err
+	}
 
-	return &parquetChunk{}, nil
+	pc := &ParquetChunk{
+		parquetFile: pf,
+	}
+	pc.blocks = make([]parquetBlock, 0, len(pf.RowGroups()))
+	for i, rg := range pf.RowGroups() {
+		tsColumn := rg.ColumnChunks()[0]
+		minTime := int64(math.MaxInt64)
+		maxTime := int64(math.MinInt64)
+		for j := 0; j < tsColumn.ColumnIndex().NumPages(); j++ {
+			min := tsColumn.ColumnIndex().MinValue(j).Int64()
+			if min < minTime {
+				minTime = min
+			}
+			max := tsColumn.ColumnIndex().MaxValue(j).Int64()
+			if max > maxTime {
+				maxTime = max
+			}
+		}
+		pf.OffsetIndexes()
+		pb := parquetBlock{
+			minTime:  minTime,
+			maxTime:  maxTime,
+			offset:   i,
+			rowGroup: pf.RowGroups()[i],
+		}
+		pc.blocks = append(pc.blocks, pb)
+	}
+
+	if s, ok := pf.Lookup("labels"); ok {
+		pc.labels = labels.Labels{}
+		err := pc.labels.UnmarshalJSON([]byte(s))
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return pc, nil
 }
 
-func (parquetChunk) Bounds() (time.Time, time.Time) {
+func (p ParquetChunk) Labels() labels.Labels {
+	return p.labels
+}
+
+// Add implements chunk.Data
+func (p ParquetChunk) Add(sample model.SamplePair) (chunk.Data, error) {
 	//TODO implement me
 	panic("implement me")
 }
 
-func (parquetChunk) SpaceFor(l *logproto.Entry) bool {
+// Marshal implements chunk.Data
+func (p ParquetChunk) Marshal(writer io.Writer) error {
 	//TODO implement me
 	panic("implement me")
 }
 
-func (parquetChunk) Append(l *logproto.Entry) error {
+// UnmarshalFromBuf implements chunk.Data
+func (p ParquetChunk) UnmarshalFromBuf(i []byte) error {
 	//TODO implement me
 	panic("implement me")
 }
 
-func (parquetChunk) Iterator(ctx context.Context, mintT, maxtT time.Time, direction logproto.Direction, pipeline log.StreamPipeline) (iter.EntryIterator, error) {
+// Entries implements chunk.Data
+func (p ParquetChunk) Entries() int {
 	//TODO implement me
 	panic("implement me")
 }
 
-func (parquetChunk) SampleIterator(ctx context.Context, from, through time.Time, extractor log.StreamSampleExtractor) iter.SampleIterator {
+func (p ParquetChunk) Bounds() (time.Time, time.Time) {
+	// TODO we can get this from the blocks I believe and not have to save these in metadata
+	var start, end time.Time
+	if s, ok := p.parquetFile.Lookup("start_time"); ok {
+		i, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			//FIXME log error
+			goto theHardWay
+		}
+		start = time.Unix(0, i)
+	}
+
+	if s, ok := p.parquetFile.Lookup("end_time"); ok {
+		i, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			//FIXME log error
+			goto theHardWay
+		}
+		end = time.Unix(0, i)
+	}
+
+	if !start.IsZero() && !end.IsZero() {
+		return start, end
+	}
+
+	// TODO how do we handle this? if we never release a version that doesn't have the required metadata do we even need this?
+theHardWay:
+	panic("implement me")
+}
+
+func (ParquetChunk) SpaceFor(l *logproto.Entry) bool {
 	//TODO implement me
 	panic("implement me")
 }
 
-func (parquetChunk) Blocks(mintT, maxtT time.Time) []Block {
+func (ParquetChunk) Append(l *logproto.Entry) error {
 	//TODO implement me
 	panic("implement me")
 }
 
-func (parquetChunk) Size() int {
+func (ParquetChunk) Iterator(ctx context.Context, mintT, maxtT time.Time, direction logproto.Direction, pipeline log.StreamPipeline) (iter.EntryIterator, error) {
 	//TODO implement me
 	panic("implement me")
 }
 
-func (parquetChunk) Bytes() ([]byte, error) {
+func (ParquetChunk) SampleIterator(ctx context.Context, from, through time.Time, extractor log.StreamSampleExtractor) iter.SampleIterator {
 	//TODO implement me
 	panic("implement me")
 }
 
-func (parquetChunk) BytesWith(bytes []byte) ([]byte, error) {
+func (p *ParquetChunk) Blocks(mintT, maxtT time.Time) []Block {
+	mint, maxt := mintT.UnixNano(), maxtT.UnixNano()
+	blocks := make([]Block, 0, len(p.blocks))
+
+	for _, b := range p.blocks {
+		if maxt >= b.minTime && b.maxTime >= mint {
+			blocks = append(blocks, b)
+		}
+	}
+	return blocks
+}
+
+func (p ParquetChunk) Size() int {
+	return int(p.parquetFile.NumRows())
+}
+
+func (ParquetChunk) Bytes() ([]byte, error) {
 	//TODO implement me
 	panic("implement me")
 }
 
-func (parquetChunk) WriteTo(w io.Writer) (n int64, err error) {
+func (ParquetChunk) BytesWith(bytes []byte) ([]byte, error) {
 	//TODO implement me
 	panic("implement me")
 }
 
-func (parquetChunk) BlockCount() int {
+func (ParquetChunk) WriteTo(w io.Writer) (n int64, err error) {
 	//TODO implement me
 	panic("implement me")
 }
 
-func (parquetChunk) Utilization() float64 {
+func (ParquetChunk) BlockCount() int {
 	//TODO implement me
 	panic("implement me")
 }
 
-func (parquetChunk) UncompressedSize() int {
+func (ParquetChunk) Utilization() float64 {
 	//TODO implement me
 	panic("implement me")
 }
 
-func (parquetChunk) CompressedSize() int {
+func (p ParquetChunk) UncompressedSize() int {
+	if s, ok := p.parquetFile.Lookup("uncompressed_size"); ok {
+		i, err := strconv.Atoi(s)
+		if err != nil {
+			//FIXME log error
+			return -1
+		}
+		return i
+	}
+	//FIXME log error?
+	return -1
+}
+
+func (p ParquetChunk) CompressedSize() int {
+	return int(p.parquetFile.Size())
+}
+
+func (ParquetChunk) Close() error {
 	//TODO implement me
 	panic("implement me")
 }
 
-func (parquetChunk) Close() error {
+func (ParquetChunk) Encoding() Encoding {
 	//TODO implement me
 	panic("implement me")
 }
 
-func (parquetChunk) Encoding() Encoding {
-	//TODO implement me
-	panic("implement me")
-}
-
-func (parquetChunk) Rebound(start, end time.Time, filter filter.Func) (Chunk, error) {
+func (ParquetChunk) Rebound(start, end time.Time, filter filter.Func) (Chunk, error) {
 	//TODO implement me
 	panic("implement me")
 }
@@ -123,9 +234,17 @@ func writeParquet(w io.Writer, c Chunk, labels labels.Labels) error {
 	// - labels for the stream
 	// - block data?
 	vers := parquet.KeyValueMetadata("version", "1")
-	lbls := parquet.KeyValueMetadata("labels", labels.String())
+	lb, err := labels.MarshalJSON()
+	if err != nil {
+		return err
+	}
+	lbls := parquet.KeyValueMetadata("labels", string(lb))
+	uncompressedSize := parquet.KeyValueMetadata("uncompressed_size", fmt.Sprintf("%d", c.UncompressedSize()))
+	st, et := c.Bounds()
+	startTime := parquet.KeyValueMetadata("start_time", fmt.Sprintf("%d", st.UnixNano()))
+	endTime := parquet.KeyValueMetadata("end_time", fmt.Sprintf("%d", et.UnixNano()))
 	schema := parquet.SchemaOf(new(LokiBaseRowType))
-	pw := parquet.NewGenericWriter[LokiBaseRowType](w, schema, vers, lbls)
+	pw := parquet.NewGenericWriter[LokiBaseRowType](w, schema, vers, lbls, uncompressedSize, startTime, endTime)
 	defer pw.Close()
 
 	// Write the blocks
@@ -157,4 +276,109 @@ func writeParquet(w io.Writer, c Chunk, labels labels.Labels) error {
 
 	return nil
 
+}
+
+type parquetBlock struct {
+	minTime  int64
+	maxTime  int64
+	offset   int
+	rowGroup parquet.RowGroup
+}
+
+func (p parquetBlock) MinTime() int64 {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (p parquetBlock) MaxTime() int64 {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (p parquetBlock) Offset() int {
+	return p.offset
+}
+
+func (p parquetBlock) Entries() int {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (p parquetBlock) Iterator(ctx context.Context, pipeline log.StreamPipeline) iter.EntryIterator {
+	return newparquetEntryIterator(ctx, pipeline, &p)
+}
+
+func (p parquetBlock) SampleIterator(ctx context.Context, extractor log.StreamSampleExtractor) iter.SampleIterator {
+	//TODO implement me
+	panic("implement me")
+}
+
+type parquetEntryIterator struct {
+	pipeline log.StreamPipeline
+	stats    *stats.Context
+	reader   *parquet.GenericReader[LokiBaseRowType]
+
+	cur        logproto.Entry
+	currLabels log.LabelsResult
+
+	err    error
+	closed bool
+}
+
+func newparquetEntryIterator(ctx context.Context, pipeline log.StreamPipeline, block *parquetBlock) iter.EntryIterator {
+
+	return &parquetEntryIterator{
+		stats:    stats.FromContext(ctx),
+		pipeline: pipeline,
+		reader:   parquet.NewGenericRowGroupReader[LokiBaseRowType](block.rowGroup),
+	}
+}
+
+func (p *parquetEntryIterator) Next() bool {
+	if p.closed {
+		return false
+	}
+	for {
+		//TODO we should read in batches here instead of one at a time I think.
+		row := make([]LokiBaseRowType, 1, 1)
+		num, err := p.reader.Read(row)
+		if num > 0 {
+			newLine, lbs, matches := p.pipeline.Process(row[0].Timestamp, []byte(row[0].Entry))
+			if !matches {
+				continue
+			}
+			p.cur.Timestamp = time.Unix(0, row[0].Timestamp)
+			p.cur.Line = string(newLine)
+			p.currLabels = lbs
+			return true
+		}
+		if err == io.EOF {
+			p.closed = true
+			p.reader.Close()
+			return false
+		}
+	}
+}
+
+func (p *parquetEntryIterator) Labels() string {
+	return p.currLabels.String()
+}
+
+func (p *parquetEntryIterator) StreamHash() uint64 {
+	return p.pipeline.BaseLabels().Hash()
+}
+
+func (p *parquetEntryIterator) Error() error {
+	return p.err
+}
+
+func (p *parquetEntryIterator) Close() error {
+	if !p.closed {
+		p.closed = true
+	}
+	return p.err
+}
+
+func (p *parquetEntryIterator) Entry() logproto.Entry {
+	return p.cur
 }
