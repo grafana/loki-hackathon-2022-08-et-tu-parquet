@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/cespare/xxhash/v2"
 	"github.com/grafana/loki/pkg/iter"
 	"github.com/grafana/loki/pkg/logproto"
 	"github.com/grafana/loki/pkg/logql/log"
@@ -286,13 +287,11 @@ type parquetBlock struct {
 }
 
 func (p parquetBlock) MinTime() int64 {
-	//TODO implement me
-	panic("implement me")
+	return p.minTime
 }
 
 func (p parquetBlock) MaxTime() int64 {
-	//TODO implement me
-	panic("implement me")
+	return p.maxTime
 }
 
 func (p parquetBlock) Offset() int {
@@ -300,8 +299,7 @@ func (p parquetBlock) Offset() int {
 }
 
 func (p parquetBlock) Entries() int {
-	//TODO implement me
-	panic("implement me")
+	return int(p.rowGroup.NumRows())
 }
 
 func (p parquetBlock) Iterator(ctx context.Context, pipeline log.StreamPipeline) iter.EntryIterator {
@@ -309,8 +307,86 @@ func (p parquetBlock) Iterator(ctx context.Context, pipeline log.StreamPipeline)
 }
 
 func (p parquetBlock) SampleIterator(ctx context.Context, extractor log.StreamSampleExtractor) iter.SampleIterator {
-	//TODO implement me
-	panic("implement me")
+	return newparquetSampleIterator(ctx, extractor, &p)
+}
+
+type parquetSampleIterator struct {
+	extractor log.StreamSampleExtractor
+	stats     *stats.Context
+	reader    *parquet.GenericReader[LokiBaseRowType]
+
+	cur        logproto.Sample
+	currLabels log.LabelsResult
+
+	err    error
+	closed bool
+}
+
+func newparquetSampleIterator(ctx context.Context, extractor log.StreamSampleExtractor, block *parquetBlock) iter.SampleIterator {
+
+	return &parquetSampleIterator{
+		stats:     stats.FromContext(ctx),
+		extractor: extractor,
+		reader:    parquet.NewGenericRowGroupReader[LokiBaseRowType](block.rowGroup),
+	}
+}
+
+func (p *parquetSampleIterator) Next() bool {
+	if p.closed {
+		return false
+	}
+	for {
+		//TODO we should read in batches here instead of one at a time I think.
+		row := make([]LokiBaseRowType, 1, 1)
+		num, err := p.reader.Read(row)
+		if num > 0 {
+			//TODO memchunk adds additional length to cover the timestamp, not sure what to add here for parquet files
+			p.stats.AddDecompressedBytes(int64(len(row[0].Entry)))
+			p.stats.AddDecompressedLines(1)
+
+			currLine := []byte(row[0].Entry)
+			currTs := row[0].Timestamp
+
+			val, labels, ok := p.extractor.Process(currTs, currLine)
+			if !ok {
+				continue
+			}
+			p.currLabels = labels
+			p.cur.Value = val
+			p.cur.Hash = xxhash.Sum64(currLine)
+			p.cur.Timestamp = currTs
+
+			return true
+		}
+		if err == io.EOF {
+			p.closed = true
+			p.reader.Close()
+			return false
+		}
+	}
+}
+
+func (p *parquetSampleIterator) Labels() string {
+	return p.currLabels.String()
+}
+
+func (p *parquetSampleIterator) StreamHash() uint64 {
+	return p.extractor.BaseLabels().Hash()
+}
+
+func (p *parquetSampleIterator) Error() error {
+	return p.err
+}
+
+func (p *parquetSampleIterator) Close() error {
+	if !p.closed {
+		p.closed = true
+	}
+	return p.err
+}
+
+func (p *parquetSampleIterator) Sample() logproto.Sample {
+	return p.cur
 }
 
 type parquetEntryIterator struct {
@@ -343,6 +419,10 @@ func (p *parquetEntryIterator) Next() bool {
 		row := make([]LokiBaseRowType, 1, 1)
 		num, err := p.reader.Read(row)
 		if num > 0 {
+			//TODO memchunk adds additional length to cover the timestamp, not sure what to add here for parquet files
+			p.stats.AddDecompressedBytes(int64(len(row[0].Entry)))
+			p.stats.AddDecompressedLines(1)
+
 			newLine, lbs, matches := p.pipeline.Process(row[0].Timestamp, []byte(row[0].Entry))
 			if !matches {
 				continue
