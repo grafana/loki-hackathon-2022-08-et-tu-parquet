@@ -14,20 +14,20 @@ var (
 		Labels: `{job="foobar", cluster="foo-central1", namespace="bar", container_name="buzz"}`,
 		Hash:   1234*10 ^ 9,
 		Entries: []Entry{
-			{now, line},
-			{now.Add(1 * time.Second), line},
-			{now.Add(2 * time.Second), line},
-			{now.Add(3 * time.Second), line},
+			{now, line, []*Metadata{{"meta1", "val1"}}},
+			{now.Add(1 * time.Second), line, nil},
+			{now.Add(2 * time.Second), line, []*Metadata(nil)},
+			{now.Add(3 * time.Second), line, []*Metadata{{"meta1", "val1"}, {"meta2", "val2"}, {"meta3", "val3"}}},
 		},
 	}
 	streamAdapter = StreamAdapter{
 		Labels: `{job="foobar", cluster="foo-central1", namespace="bar", container_name="buzz"}`,
 		Hash:   1234*10 ^ 9,
 		Entries: []EntryAdapter{
-			{now, line},
-			{now.Add(1 * time.Second), line},
-			{now.Add(2 * time.Second), line},
-			{now.Add(3 * time.Second), line},
+			{now, line, []*Metadata{{"meta1", "val1"}}},
+			{now.Add(1 * time.Second), line, nil},
+			{now.Add(2 * time.Second), line, []*Metadata(nil)},
+			{now.Add(3 * time.Second), line, []*Metadata{{"meta1", "val1"}, {"meta2", "val2"}, {"meta3", "val3"}}},
 		},
 	}
 )
