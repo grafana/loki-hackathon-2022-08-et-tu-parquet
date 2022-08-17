@@ -76,6 +76,58 @@ func NewParquetChunk(b []byte) (*ParquetChunk, error) {
 	return pc, nil
 }
 
+func writeParquet(w io.Writer, c Chunk, labels labels.Labels) error {
+
+	// Define the schema
+	// Metadata
+	// - a version number of the schema
+	// - labels for the stream
+	// - block data?
+	vers := parquet.KeyValueMetadata("version", "1")
+	lb, err := labels.MarshalJSON()
+	if err != nil {
+		return err
+	}
+	lbls := parquet.KeyValueMetadata("labels", string(lb))
+	uncompressedSize := parquet.KeyValueMetadata("uncompressed_size", fmt.Sprintf("%d", c.UncompressedSize()))
+	st, et := c.Bounds()
+	startTime := parquet.KeyValueMetadata("start_time", fmt.Sprintf("%d", st.UnixNano()))
+	endTime := parquet.KeyValueMetadata("end_time", fmt.Sprintf("%d", et.UnixNano()))
+	schema := parquet.SchemaOf(new(LokiBaseRowType))
+	pw := parquet.NewGenericWriter[LokiBaseRowType](w, schema, vers, lbls, uncompressedSize, startTime, endTime)
+	defer pw.Close()
+
+	// Write the blocks
+	blocks := c.Blocks(c.Bounds())
+	for _, b := range blocks {
+		itr := b.Iterator(context.Background(), noopStreamPipeline)
+		//TODO This should batch write instead of doing one entry at a time.
+		for itr.Next() {
+			_, err := pw.Write([]LokiBaseRowType{
+				{
+					Timestamp: itr.Entry().Timestamp.UnixNano(),
+					Entry:     itr.Entry().Line,
+				},
+			})
+			if err != nil {
+				return err
+			}
+		}
+		err := itr.Close()
+		if err != nil {
+			return err
+		}
+		// Calling flush will create a row group, we are mapping a block to a row group
+		err = pw.Flush()
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+
+}
+
 func (p ParquetChunk) Labels() labels.Labels {
 	return p.labels
 }
@@ -225,58 +277,6 @@ func (ParquetChunk) Encoding() Encoding {
 func (ParquetChunk) Rebound(start, end time.Time, filter filter.Func) (Chunk, error) {
 	//TODO implement me
 	panic("implement me")
-}
-
-func writeParquet(w io.Writer, c Chunk, labels labels.Labels) error {
-
-	// Define the schema
-	// Metadata
-	// - a version number of the schema
-	// - labels for the stream
-	// - block data?
-	vers := parquet.KeyValueMetadata("version", "1")
-	lb, err := labels.MarshalJSON()
-	if err != nil {
-		return err
-	}
-	lbls := parquet.KeyValueMetadata("labels", string(lb))
-	uncompressedSize := parquet.KeyValueMetadata("uncompressed_size", fmt.Sprintf("%d", c.UncompressedSize()))
-	st, et := c.Bounds()
-	startTime := parquet.KeyValueMetadata("start_time", fmt.Sprintf("%d", st.UnixNano()))
-	endTime := parquet.KeyValueMetadata("end_time", fmt.Sprintf("%d", et.UnixNano()))
-	schema := parquet.SchemaOf(new(LokiBaseRowType))
-	pw := parquet.NewGenericWriter[LokiBaseRowType](w, schema, vers, lbls, uncompressedSize, startTime, endTime)
-	defer pw.Close()
-
-	// Write the blocks
-	blocks := c.Blocks(c.Bounds())
-	for _, b := range blocks {
-		itr := b.Iterator(context.Background(), noopStreamPipeline)
-		//TODO This should batch write instead of doing one entry at a time.
-		for itr.Next() {
-			_, err := pw.Write([]LokiBaseRowType{
-				{
-					Timestamp: itr.Entry().Timestamp.UnixNano(),
-					Entry:     itr.Entry().Line,
-				},
-			})
-			if err != nil {
-				return err
-			}
-		}
-		err := itr.Close()
-		if err != nil {
-			return err
-		}
-		// Calling flush will create a row group, we are mapping a block to a row group
-		err = pw.Flush()
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-
 }
 
 type parquetBlock struct {
