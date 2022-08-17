@@ -137,6 +137,7 @@ message EntryAdapter {
     (gogoproto.jsontag) = "ts"
   ];
   string line = 2 [(gogoproto.jsontag) = "line"];
+  map<string, string> metadata = 3 [(gogoproto.jsontag) = "metadata"];
 }
 
 message Sample {

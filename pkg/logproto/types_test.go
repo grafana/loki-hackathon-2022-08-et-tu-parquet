@@ -14,20 +14,20 @@ var (
 		Labels: `{job="foobar", cluster="foo-central1", namespace="bar", container_name="buzz"}`,
 		Hash:   1234*10 ^ 9,
 		Entries: []Entry{
-			{now, line},
-			{now.Add(1 * time.Second), line},
-			{now.Add(2 * time.Second), line},
-			{now.Add(3 * time.Second), line},
+			{now, line, map[string]string{"meta1": "val1"}},
+			{now.Add(1 * time.Second), line, map[string]string(nil)},
+			{now.Add(2 * time.Second), line, map[string]string{"meta1": "val1"}},
+			{now.Add(3 * time.Second), line, nil},
 		},
 	}
 	streamAdapter = StreamAdapter{
 		Labels: `{job="foobar", cluster="foo-central1", namespace="bar", container_name="buzz"}`,
 		Hash:   1234*10 ^ 9,
 		Entries: []EntryAdapter{
-			{now, line},
-			{now.Add(1 * time.Second), line},
-			{now.Add(2 * time.Second), line},
-			{now.Add(3 * time.Second), line},
+			{now, line, map[string]string{"meta1": "val1"}},
+			{now.Add(1 * time.Second), line, map[string]string(nil)},
+			{now.Add(2 * time.Second), line, map[string]string{"meta1": "val1"}},
+			{now.Add(3 * time.Second), line, nil},
 		},
 	}
 )
@@ -60,6 +60,11 @@ func TestStreamAdapter(t *testing.T) {
 	t.Log("avg allocs per run:", avg)
 }
 
+// Note: TestCompatibility will fail if you specify more than one entry for metadata because
+// the MarshalToSizedBuffer function ranges over the map which has a non deterministic output
+// We could modify the code in types.go to sort the output to make it deterministic but that
+// seems a waste to make a test pass, so for now we make sure to only specify one key value
+// in the test streams above.
 func TestCompatibility(t *testing.T) {
 	b, err := stream.Marshal()
 	require.NoError(t, err)
