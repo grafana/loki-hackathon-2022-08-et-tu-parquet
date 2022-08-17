@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"time"
 
@@ -145,6 +146,7 @@ type Chunk interface {
 	Close() error
 	Encoding() Encoding
 	Rebound(start, end time.Time, filter filter.Func) (Chunk, error)
+	MetadataColumns() map[string]reflect.Type
 }
 
 // Block is a chunk block.

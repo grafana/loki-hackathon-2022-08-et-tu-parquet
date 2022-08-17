@@ -342,6 +342,7 @@ func (c *Chunk) Decode(decodeContext *DecodeContext, input []byte) error {
 			return err
 		}
 		c.Metric = c.Data.Labels()
+		c.encoded = input
 		return nil
 	}
 

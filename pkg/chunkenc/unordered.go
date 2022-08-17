@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"reflect"
 	"time"
 
 	"github.com/Workiva/go-datastructures/rangetree"
@@ -34,7 +35,7 @@ type HeadBlock interface {
 	Entries() int
 	UncompressedSize() int
 	Convert(HeadBlockFmt) (HeadBlock, error)
-	Append(int64, string) error
+	Append(*logproto.Entry) error
 	Iterator(
 		ctx context.Context,
 		direction logproto.Direction,
@@ -49,6 +50,7 @@ type HeadBlock interface {
 		extractor log.StreamSampleExtractor,
 	) iter.SampleIterator
 	Format() HeadBlockFmt
+	MetadataColumns() map[string]reflect.Type
 }
 
 type unorderedHeadBlock struct {
@@ -60,6 +62,8 @@ type unorderedHeadBlock struct {
 	lines      int   // number of entries
 	size       int   // size of uncompressed bytes.
 	mint, maxt int64 // upper and lower bounds
+
+	columns map[string]reflect.Type
 }
 
 func newUnorderedHeadBlock() *unorderedHeadBlock {
@@ -91,17 +95,22 @@ func (hb *unorderedHeadBlock) Reset() {
 	*hb = *x
 }
 
+type entryWithMetadata struct {
+	line string
+	meta map[string]string
+}
+
 // collection of entries belonging to the same nanosecond
 type nsEntries struct {
 	ts      int64
-	entries []string
+	entries []entryWithMetadata
 }
 
 func (e *nsEntries) ValueAtDimension(_ uint64) int64 {
 	return e.ts
 }
 
-func (hb *unorderedHeadBlock) Append(ts int64, line string) error {
+func (hb *unorderedHeadBlock) Append(entry *logproto.Entry) error {
 	// This is an allocation hack. The rangetree lib does not
 	// support the ability to pass a "mutate" function during an insert
 	// and instead will displace any existing entry at the specified timestamp.
@@ -111,6 +120,7 @@ func (hb *unorderedHeadBlock) Append(ts int64, line string) error {
 	// Then, we detect if we've displaced any existing entries, and
 	// append the new one to the existing, preallocated slice.
 	// If not, we create a slice with one entry.
+	ts := entry.Timestamp.UnixNano()
 	e := &nsEntries{
 		ts: ts,
 	}
@@ -120,14 +130,14 @@ func (hb *unorderedHeadBlock) Append(ts int64, line string) error {
 		// entries at the same time with the same content, iterate through any existing
 		// entries and ignore the line if we already have an entry with the same content
 		for _, et := range displaced[0].(*nsEntries).entries {
-			if et == line {
+			if et.line == entry.Line {
 				e.entries = displaced[0].(*nsEntries).entries
 				return nil
 			}
 		}
-		e.entries = append(displaced[0].(*nsEntries).entries, line)
+		e.entries = append(displaced[0].(*nsEntries).entries, entryWithMetadata{line: entry.Line, meta: entry.Metadata})
 	} else {
-		e.entries = []string{line}
+		e.entries = []entryWithMetadata{{line: entry.Line, meta: entry.Metadata}}
 	}
 
 	// Update hb metdata
@@ -139,8 +149,16 @@ func (hb *unorderedHeadBlock) Append(ts int64, line string) error {
 		hb.maxt = ts
 	}
 
-	hb.size += len(line)
+	hb.size += len(entry.Line)
 	hb.lines++
+
+	// Store columns in metadata
+	for k, v := range entry.Metadata {
+		if _, ok := hb.columns[k]; !ok {
+			// TODO we should try to determine if the value type is numeric and be able to use numeric columns instead of string
+			hb.columns[k] = reflect.TypeOf(v)
+		}
+	}
 
 	return nil
 }
@@ -162,7 +180,7 @@ func (hb *unorderedHeadBlock) forEntries(
 	direction logproto.Direction,
 	mint,
 	maxt int64,
-	entryFn func(int64, string) error, // returning an error exits early
+	entryFn func(*logproto.Entry) error, // returning an error exits early
 ) (err error) {
 	if hb.IsEmpty() || (maxt < hb.mint || hb.maxt < mint) {
 		return
@@ -191,9 +209,10 @@ func (hb *unorderedHeadBlock) forEntries(
 		}
 
 		for ; i < len(es.entries) && i >= 0; next() {
-			line := es.entries[i]
+			line := es.entries[i].line
 			chunkStats.AddHeadChunkBytes(int64(len(line)))
-			err = entryFn(es.ts, line)
+			// TODO how much does it affect performance to have to create a logproto.Entry here? Before changing the entryFn definition we didn't have to.
+			err = entryFn(&logproto.Entry{Timestamp: time.Unix(0, es.ts), Line: line, Metadata: es.entries[i].meta})
 
 		}
 	}
@@ -235,8 +254,9 @@ func (hb *unorderedHeadBlock) Iterator(
 		direction,
 		mint,
 		maxt,
-		func(ts int64, line string) error {
-			newLine, parsedLbs, matches := pipeline.ProcessString(ts, line)
+		func(entry *logproto.Entry) error {
+			ts := entry.Timestamp.UnixNano()
+			newLine, parsedLbs, matches := pipeline.ProcessString(ts, entry.Line)
 			if !matches {
 				return nil
 			}
@@ -255,6 +275,7 @@ func (hb *unorderedHeadBlock) Iterator(
 			stream.Entries = append(stream.Entries, logproto.Entry{
 				Timestamp: time.Unix(0, ts),
 				Line:      newLine,
+				Metadata:  entry.Metadata,
 			})
 			return nil
 		},
@@ -284,7 +305,9 @@ func (hb *unorderedHeadBlock) SampleIterator(
 		logproto.FORWARD,
 		mint,
 		maxt,
-		func(ts int64, line string) error {
+		func(entry *logproto.Entry) error {
+			ts := entry.Timestamp.UnixNano()
+			line := entry.Line
 			value, parsedLabels, ok := extractor.ProcessString(ts, line)
 			if !ok {
 				return nil
@@ -346,14 +369,14 @@ func (hb *unorderedHeadBlock) Serialise(pool WriterPool) ([]byte, error) {
 		logproto.FORWARD,
 		0,
 		math.MaxInt64,
-		func(ts int64, line string) error {
-			n := binary.PutVarint(encBuf, ts)
+		func(entry *logproto.Entry) error {
+			n := binary.PutVarint(encBuf, entry.Timestamp.UnixNano())
 			inBuf.Write(encBuf[:n])
 
-			n = binary.PutUvarint(encBuf, uint64(len(line)))
+			n = binary.PutUvarint(encBuf, uint64(len(entry.Line)))
 			inBuf.Write(encBuf[:n])
 
-			inBuf.WriteString(line)
+			inBuf.WriteString(entry.Line)
 			return nil
 		},
 	)
@@ -379,8 +402,8 @@ func (hb *unorderedHeadBlock) Convert(version HeadBlockFmt) (HeadBlock, error) {
 		logproto.FORWARD,
 		0,
 		math.MaxInt64,
-		func(ts int64, line string) error {
-			return out.Append(ts, line)
+		func(entry *logproto.Entry) error {
+			return out.Append(entry)
 		},
 	)
 	return out, err
@@ -432,16 +455,16 @@ func (hb *unorderedHeadBlock) CheckpointTo(w io.Writer) error {
 		logproto.FORWARD,
 		0,
 		math.MaxInt64,
-		func(ts int64, line string) error {
-			eb.putVarint64(ts)
-			eb.putUvarint(len(line))
+		func(entry *logproto.Entry) error {
+			eb.putVarint64(entry.Timestamp.UnixNano())
+			eb.putUvarint(len(entry.Line))
 			_, err = w.Write(eb.get())
 			if err != nil {
 				return errors.Wrap(err, "write headBlock entry ts")
 			}
 			eb.reset()
 
-			_, err := io.WriteString(w, line)
+			_, err := io.WriteString(w, entry.Line)
 			if err != nil {
 				return errors.Wrap(err, "write headblock entry line")
 			}
@@ -481,7 +504,8 @@ func (hb *unorderedHeadBlock) LoadBytes(b []byte) error {
 		ts := db.varint64()
 		lineLn := db.uvarint()
 		line := string(db.bytes(lineLn))
-		if err := hb.Append(ts, line); err != nil {
+		// TODO need to read metadata here
+		if err := hb.Append(&logproto.Entry{Timestamp: time.Unix(0, ts), Line: line}); err != nil {
 			return err
 		}
 	}
@@ -491,6 +515,10 @@ func (hb *unorderedHeadBlock) LoadBytes(b []byte) error {
 	}
 
 	return nil
+}
+
+func (hb *unorderedHeadBlock) MetadataColumns() map[string]reflect.Type {
+	return hb.columns
 }
 
 // HeadFromCheckpoint handles reading any head block format and returning the desired form.

@@ -16,13 +16,15 @@ import (
 	"github.com/segmentio/parquet-go"
 	"io"
 	"math"
+	"reflect"
 	"strconv"
 	"time"
 )
 
 type LokiBaseRowType struct {
-	Timestamp int64  `parquet:",delta"`
-	Entry     string `parquet:",snappy"`
+	Timestamp int64             `parquet:",delta"`
+	Entry     string            `parquet:",snappy"`
+	Metadata  map[string]string `parquet: ",snappy"`
 }
 
 type ParquetChunk struct {
@@ -55,7 +57,7 @@ func NewParquetChunk(b []byte) (*ParquetChunk, error) {
 				maxTime = max
 			}
 		}
-		pf.OffsetIndexes()
+
 		pb := parquetBlock{
 			minTime:  minTime,
 			maxTime:  maxTime,
@@ -93,22 +95,46 @@ func writeParquet(w io.Writer, c Chunk, labels labels.Labels) error {
 	st, et := c.Bounds()
 	startTime := parquet.KeyValueMetadata("start_time", fmt.Sprintf("%d", st.UnixNano()))
 	endTime := parquet.KeyValueMetadata("end_time", fmt.Sprintf("%d", et.UnixNano()))
-	schema := parquet.SchemaOf(new(LokiBaseRowType))
-	pw := parquet.NewGenericWriter[LokiBaseRowType](w, schema, vers, lbls, uncompressedSize, startTime, endTime)
+
+	fields := []reflect.StructField{
+		{
+			Name: "Timestamp",
+			Type: reflect.TypeOf(int64(0)),
+			Tag:  `parquet:",delta"`,
+		},
+		{
+			Name: "Line",
+			Type: reflect.TypeOf(""),
+			Tag:  `parquet:",snappy"`,
+		},
+	}
+	mc := c.MetadataColumns()
+	for k, v := range mc {
+		fields = append(fields, reflect.StructField{Name: k, Type: v, Tag: `parquet:",snappy"`})
+	}
+	typ := reflect.StructOf(fields)
+	//schema := parquet.PissSchemaOf(typ)
+	schema := parquet.SchemaOf(reflect.New(typ).Interface())
+	pw := parquet.NewWriter(w, schema, vers, lbls, uncompressedSize, startTime, endTime)
 	defer pw.Close()
 
 	// Write the blocks
 	blocks := c.Blocks(c.Bounds())
 	for _, b := range blocks {
 		itr := b.Iterator(context.Background(), noopStreamPipeline)
-		//TODO This should batch write instead of doing one entry at a time.
 		for itr.Next() {
-			_, err := pw.Write([]LokiBaseRowType{
-				{
-					Timestamp: itr.Entry().Timestamp.UnixNano(),
-					Entry:     itr.Entry().Line,
-				},
-			})
+			row := reflect.New(typ)
+			//derefRow := dereference(row)
+			row.Elem().FieldByName("Timestamp").Set(reflect.ValueOf(itr.Entry().Timestamp.UnixNano()))
+			row.Elem().FieldByName("Line").Set(reflect.ValueOf(itr.Entry().Line))
+			//row := make(parquet.Row, 2)
+			//row[0] = parquet.ValueOf(itr.Entry().Timestamp.UnixNano())
+			//row[1] = parquet.ValueOf(itr.Entry().Line)
+			//row[0] = row[0].Level(0, 0, 0)
+			//row[1] = row[1].Level(0, 0, 1)
+			// TODO write more than one row at a time?
+			//fmt.Printf("%v", row)
+			err := pw.Write(row.Interface())
 			if err != nil {
 				return err
 			}
@@ -279,6 +305,10 @@ func (ParquetChunk) Rebound(start, end time.Time, filter filter.Func) (Chunk, er
 	panic("implement me")
 }
 
+func (ParquetChunk) MetadataColumns() map[string]reflect.Type {
+	panic("who would call this?")
+}
+
 type parquetBlock struct {
 	minTime  int64
 	maxTime  int64
@@ -392,7 +422,7 @@ func (p *parquetSampleIterator) Sample() logproto.Sample {
 type parquetEntryIterator struct {
 	pipeline log.StreamPipeline
 	stats    *stats.Context
-	reader   *parquet.GenericReader[LokiBaseRowType]
+	reader   *parquet.Reader
 
 	cur        logproto.Entry
 	currLabels log.LabelsResult
@@ -406,7 +436,7 @@ func newparquetEntryIterator(ctx context.Context, pipeline log.StreamPipeline, b
 	return &parquetEntryIterator{
 		stats:    stats.FromContext(ctx),
 		pipeline: pipeline,
-		reader:   parquet.NewGenericRowGroupReader[LokiBaseRowType](block.rowGroup),
+		reader:   parquet.NewRowGroupReader(block.rowGroup),
 	}
 }
 
@@ -416,18 +446,23 @@ func (p *parquetEntryIterator) Next() bool {
 	}
 	for {
 		//TODO we should read in batches here instead of one at a time I think.
-		row := make([]LokiBaseRowType, 1, 1)
-		num, err := p.reader.Read(row)
+		//row := make([]LokiBaseRowType, 1, 1)
+		row := make([]parquet.Row, 1, 1)
+		num, err := p.reader.ReadRows(row)
+		//num, err := p.reader.Read(row)
 		if num > 0 {
 			//TODO memchunk adds additional length to cover the timestamp, not sure what to add here for parquet files
-			p.stats.AddDecompressedBytes(int64(len(row[0].Entry)))
+			p.stats.AddDecompressedBytes(int64(len(row[0][1].Bytes())))
 			p.stats.AddDecompressedLines(1)
 
-			newLine, lbs, matches := p.pipeline.Process(row[0].Timestamp, []byte(row[0].Entry))
+			columns := p.reader.Schema().Columns()
+			fmt.Println(columns)
+
+			newLine, lbs, matches := p.pipeline.Process(row[0][0].Int64(), row[0][1].Bytes())
 			if !matches {
 				continue
 			}
-			p.cur.Timestamp = time.Unix(0, row[0].Timestamp)
+			p.cur.Timestamp = time.Unix(0, row[0][0].Int64())
 			p.cur.Line = string(newLine)
 			p.currLabels = lbs
 			return true
@@ -461,4 +496,11 @@ func (p *parquetEntryIterator) Close() error {
 
 func (p *parquetEntryIterator) Entry() logproto.Entry {
 	return p.cur
+}
+
+func dereference(t reflect.Value) reflect.Value {
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	return t
 }

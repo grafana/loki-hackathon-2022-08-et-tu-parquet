@@ -160,12 +160,15 @@ func (hb *headBlock) Reset() {
 
 func (hb *headBlock) Bounds() (int64, int64) { return hb.mint, hb.maxt }
 
-func (hb *headBlock) Append(ts int64, line string) error {
+func (hb *headBlock) Append(e *logproto.Entry) error {
+	//TODO support metadata in ordered headblock
+	ts := e.Timestamp.UnixNano()
+	line := e.Line
 	if !hb.IsEmpty() && hb.maxt > ts {
 		return ErrOutOfOrder
 	}
 
-	hb.entries = append(hb.entries, entry{ts, line})
+	hb.entries = append(hb.entries, entry{ts, line, e.Metadata})
 	if hb.mint == 0 || hb.mint > ts {
 		hb.mint = ts
 	}
@@ -194,6 +197,8 @@ func (hb *headBlock) Serialise(pool WriterPool) ([]byte, error) {
 		inBuf.Write(encBuf[:n])
 
 		inBuf.WriteString(logEntry.s)
+
+		//TODO need to start writing metadata here, I think we can write a number for # of key values, then a length and a string for the key, then a length and a string for a value
 	}
 
 	if _, err := compressedWriter.Write(inBuf.Bytes()); err != nil {
@@ -319,16 +324,21 @@ func (hb *headBlock) Convert(version HeadBlockFmt) (HeadBlock, error) {
 	out := newUnorderedHeadBlock()
 
 	for _, e := range hb.entries {
-		if err := out.Append(e.t, e.s); err != nil {
+		if err := out.Append(&logproto.Entry{Timestamp: time.Unix(0, e.t), Line: e.s, Metadata: e.m}); err != nil {
 			return nil, err
 		}
 	}
 	return out, nil
 }
 
+func (hb *headBlock) MetadataColumns() map[string]reflect.Type {
+	panic("implement me")
+}
+
 type entry struct {
 	t int64
 	s string
+	m map[string]string
 }
 
 // NewMemChunk returns a new in-mem chunk.
@@ -675,7 +685,7 @@ func (c *MemChunk) Append(entry *logproto.Entry) error {
 		return ErrOutOfOrder
 	}
 
-	if err := c.head.Append(entryTimestamp, entry.Line); err != nil {
+	if err := c.head.Append(entry); err != nil {
 		return err
 	}
 
@@ -951,6 +961,10 @@ func (c *MemChunk) Rebound(start, end time.Time, filter filter.Func) (Chunk, err
 	return newChunk, nil
 }
 
+func (c *MemChunk) MetadataColumns() map[string]reflect.Type {
+	return c.head.MetadataColumns()
+}
+
 // encBlock is an internal wrapper for a block, mainly to avoid binding an encoding in a block itself.
 // This may seem roundabout, but the encoding is already a field on the parent MemChunk type. encBlock
 // then allows us to bind a decoding context to a block when requested, but otherwise helps reduce the
@@ -1027,6 +1041,7 @@ func (hb *headBlock) Iterator(ctx context.Context, direction logproto.Direction,
 		stream.Entries = append(stream.Entries, logproto.Entry{
 			Timestamp: time.Unix(0, e.t),
 			Line:      newLine,
+			Metadata:  e.m,
 		})
 	}
 

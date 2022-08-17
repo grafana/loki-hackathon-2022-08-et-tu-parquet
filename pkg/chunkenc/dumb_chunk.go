@@ -3,6 +3,7 @@ package chunkenc
 import (
 	"context"
 	"io"
+	"reflect"
 	"sort"
 	"time"
 
@@ -125,6 +126,10 @@ func (c *dumbChunk) Close() error {
 
 func (c *dumbChunk) Rebound(start, end time.Time, filter filter.Func) (Chunk, error) {
 	return nil, nil
+}
+
+func (c *dumbChunk) MetadataColumns() map[string]reflect.Type {
+	return map[string]reflect.Type{}
 }
 
 type dumbChunkIterator struct {
