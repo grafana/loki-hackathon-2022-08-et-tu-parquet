@@ -130,11 +130,6 @@ message StreamAdapter {
   uint64 hash = 3 [(gogoproto.jsontag) = "-"];
 }
 
-message Metadata {
-  string key = 1 [(gogoproto.jsontag) = "key"];
-  string value = 2 [(gogoproto.jsontag) = "value"];
-}
-
 message EntryAdapter {
   google.protobuf.Timestamp timestamp = 1 [
     (gogoproto.stdtime) = true,
@@ -142,7 +137,6 @@ message EntryAdapter {
     (gogoproto.jsontag) = "ts"
   ];
   string line = 2 [(gogoproto.jsontag) = "line"];
-  repeated Metadata metadata = 3 [(gogoproto.jsontag) = "metadata"];
 }
 
 message Sample {

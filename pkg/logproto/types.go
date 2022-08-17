@@ -19,9 +19,8 @@ type Stream struct {
 
 // Entry is a log entry with a timestamp.
 type Entry struct {
-	Timestamp time.Time   `protobuf:"bytes,1,opt,name=timestamp,proto3,stdtime" json:"ts"`
-	Line      string      `protobuf:"bytes,2,opt,name=line,proto3" json:"line"`
-	Metadata  []*Metadata `protobuf:"bytes,3,rep,name=metadata,proto3" json:"metadata"`
+	Timestamp time.Time `protobuf:"bytes,1,opt,name=timestamp,proto3,stdtime" json:"ts"`
+	Line      string    `protobuf:"bytes,2,opt,name=line,proto3" json:"line"`
 }
 
 func (m *Stream) Marshal() (dAtA []byte, err error) {
@@ -93,20 +92,6 @@ func (m *Entry) MarshalToSizedBuffer(dAtA []byte) (int, error) {
 	_ = i
 	var l int
 	_ = l
-	if len(m.Metadata) > 0 {
-		for iNdEx := len(m.Metadata) - 1; iNdEx >= 0; iNdEx-- {
-			{
-				size, err := m.Metadata[iNdEx].MarshalToSizedBuffer(dAtA[:i])
-				if err != nil {
-					return 0, err
-				}
-				i -= size
-				i = encodeVarintLogproto(dAtA, i, uint64(size))
-			}
-			i--
-			dAtA[i] = 0x1a
-		}
-	}
 	if len(m.Line) > 0 {
 		i -= len(m.Line)
 		copy(dAtA[i:], m.Line)
@@ -358,40 +343,6 @@ func (m *Entry) Unmarshal(dAtA []byte) error {
 			}
 			m.Line = string(dAtA[iNdEx:postIndex])
 			iNdEx = postIndex
-		case 3:
-			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field Metadata", wireType)
-			}
-			var msglen int
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowLogproto
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				msglen |= int(b&0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			if msglen < 0 {
-				return ErrInvalidLengthLogproto
-			}
-			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthLogproto
-			}
-			if postIndex > l {
-				return io.ErrUnexpectedEOF
-			}
-			m.Metadata = append(m.Metadata, &Metadata{})
-			if err := m.Metadata[len(m.Metadata)-1].Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
-				return err
-			}
-			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
 			skippy, err := skipLogproto(dAtA[iNdEx:])
@@ -450,12 +401,6 @@ func (m *Entry) Size() (n int) {
 	l = len(m.Line)
 	if l > 0 {
 		n += 1 + l + sovLogproto(uint64(l))
-	}
-	if len(m.Metadata) > 0 {
-		for _, e := range m.Metadata {
-			l = e.Size()
-			n += 1 + l + sovLogproto(uint64(l))
-		}
 	}
 	return n
 }
@@ -517,14 +462,6 @@ func (m *Entry) Equal(that interface{}) bool {
 	}
 	if m.Line != that1.Line {
 		return false
-	}
-	if len(m.Metadata) != len(that1.Metadata) {
-		return false
-	}
-	for i := range m.Metadata {
-		if !m.Metadata[i].Equal(that1.Metadata[i]) {
-			return false
-		}
 	}
 	return true
 }
