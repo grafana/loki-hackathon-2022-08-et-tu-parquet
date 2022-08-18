@@ -113,7 +113,7 @@ func (e *nsEntries) ValueAtDimension(_ uint64) int64 {
 
 func (hb *unorderedHeadBlock) Append(entry *logproto.Entry) error {
 
-	entry.Metadata = map[string]string{"test1": "val1", "test2": "val2"}
+	entry.Metadata = map[string]string{"Test1": "val1", "Test2": "val2"}
 	// This is an allocation hack. The rangetree lib does not
 	// support the ability to pass a "mutate" function during an insert
 	// and instead will displace any existing entry at the specified timestamp.
@@ -539,7 +539,6 @@ func (hb *unorderedHeadBlock) LoadBytes(b []byte) error {
 }
 
 func (hb *unorderedHeadBlock) MetadataColumns() map[string]reflect.Type {
-	//FIXME this gets reset which is no good...
 	return hb.columns
 }
 

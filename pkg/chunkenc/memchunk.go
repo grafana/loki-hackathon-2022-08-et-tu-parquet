@@ -116,6 +116,9 @@ type MemChunk struct {
 	format   byte
 	encoding Encoding
 	headFmt  HeadBlockFmt
+
+	// metadata columns in this chunk
+	columns map[string]reflect.Type
 }
 
 type block struct {
@@ -150,6 +153,7 @@ func (hb *headBlock) Entries() int { return len(hb.entries) }
 func (hb *headBlock) UncompressedSize() int { return hb.size }
 
 func (hb *headBlock) Reset() {
+	// TODO need to handle metadata in ordered headblock here
 	if hb.entries != nil {
 		hb.entries = hb.entries[:0]
 	}
@@ -371,6 +375,8 @@ func NewMemChunk(enc Encoding, head HeadBlockFmt, blockSize, targetSize int) *Me
 
 		encoding: enc,
 		headFmt:  head,
+
+		columns: map[string]reflect.Type{},
 	}
 }
 
@@ -380,6 +386,7 @@ func NewByteChunk(b []byte, blockSize, targetSize int) (*MemChunk, error) {
 		head:       &headBlock{}, // Dummy, empty headblock.
 		blockSize:  blockSize,
 		targetSize: targetSize,
+		columns:    map[string]reflect.Type{},
 	}
 	db := decbuf{b: b}
 
@@ -785,7 +792,13 @@ func (c *MemChunk) cut() error {
 	})
 
 	c.cutBlockSize += len(b)
-	// TODO get the metadata colums out of here before resetting
+
+	md := c.head.MetadataColumns()
+	for k, v := range md {
+		//TODO should we error here if a type changes? This would at least error on the write path I believe and the error could be sent back to the user?
+		c.columns[k] = v
+	}
+
 	c.head.Reset()
 	return nil
 }
@@ -981,7 +994,7 @@ func (c *MemChunk) Rebound(start, end time.Time, filter filter.Func) (Chunk, err
 }
 
 func (c *MemChunk) MetadataColumns() map[string]reflect.Type {
-	return c.head.MetadataColumns()
+	return c.columns
 }
 
 // encBlock is an internal wrapper for a block, mainly to avoid binding an encoding in a block itself.
@@ -1230,7 +1243,19 @@ func (si *bufferedIterator) moveNext() (int64, []byte, map[string]string, bool) 
 		return 0, nil, nil, false
 	}
 
-	line, err := si.readString(lineSize)
+	if si.buf == nil || lineSize > cap(si.buf) {
+		// in case of a replacement we replace back the buffer in the pool
+		if si.buf != nil {
+			BytesBufferPool.Put(si.buf)
+		}
+		si.buf = BytesBufferPool.Get(lineSize).([]byte)
+		if lineSize > cap(si.buf) {
+			si.err = fmt.Errorf("could not get a line buffer of size %d, actual %d", lineSize, cap(si.buf))
+			return 0, nil, nil, false
+		}
+	}
+
+	err = si.readString(&si.buf, lineSize)
 	if err != nil {
 		si.err = err
 		return 0, nil, nil, false
@@ -1276,7 +1301,10 @@ func (si *bufferedIterator) moveNext() (int64, []byte, map[string]string, bool) 
 	}
 
 	meta := make(map[string]string, int(l))
-
+	// TODO we pool the slices used for the log line in si.buf, we should probably do some pooling here?
+	// Likely we should pool the meta map to save a bunch of allocations.
+	keySlice := []byte{}
+	valSlice := []byte{}
 	// Iterate over the key value pairs and read them
 	for i := uint64(0); i < l; i++ {
 		// Read Key
@@ -1285,7 +1313,7 @@ func (si *bufferedIterator) moveNext() (int64, []byte, map[string]string, bool) 
 			si.err = err
 			return 0, nil, nil, false
 		}
-		k, err := si.readString(length)
+		err = si.readString(&keySlice, length)
 		if err != nil {
 			si.err = err
 			return 0, nil, nil, false
@@ -1297,15 +1325,15 @@ func (si *bufferedIterator) moveNext() (int64, []byte, map[string]string, bool) 
 			si.err = err
 			return 0, nil, nil, false
 		}
-		v, err := si.readString(length)
+		err = si.readString(&valSlice, length)
 		if err != nil {
 			si.err = err
 			return 0, nil, nil, false
 		}
-		meta[string(k)] = string(v)
+		meta[string(keySlice)] = string(valSlice)
 	}
 
-	return ts, line, meta, true
+	return ts, si.buf, meta, true
 }
 
 func (si *bufferedIterator) readLength() (int, error) {
@@ -1318,38 +1346,24 @@ func (si *bufferedIterator) readLength() (int, error) {
 	return int(ln), nil
 }
 
-func (si *bufferedIterator) readString(length int) ([]byte, error) {
-	//ln, err := binary.ReadUvarint(si.bufReader)
-	//if err != nil {
-	//	if err != io.EOF {
-	//		return nil, err
-	//	}
-	//}
-	//length := int(ln)
-	// If the buffer is not yet initialize or too small, we get a new one.
-	if si.buf == nil || length > cap(si.buf) {
-		// in case of a replacement we replace back the buffer in the pool
-		if si.buf != nil {
-			BytesBufferPool.Put(si.buf)
-		}
-		si.buf = BytesBufferPool.Get(length).([]byte)
-		if length > cap(si.buf) {
-			return nil, fmt.Errorf("could not get a line buffer of size %d, actual %d", length, cap(si.buf))
-		}
+func (si *bufferedIterator) readString(slice *[]byte, length int) error {
+	if cap(*slice) < length {
+		*slice = make([]byte, 0, length)
 	}
-	// Then process reading the line.
-	n, err := si.bufReader.Read(si.buf[:length])
+	n, err := si.bufReader.Read((*slice)[:length])
 	if err != nil && err != io.EOF {
-		return nil, err
+		return err
 	}
 	for n < length {
-		r, err := si.bufReader.Read(si.buf[n:length])
+		r, err := si.bufReader.Read((*slice)[n:length])
 		if err != nil && err != io.EOF {
-			return nil, err
+			return err
 		}
 		n += r
 	}
-	return si.buf[:length], nil
+	// reslice to the proper length
+	*slice = (*slice)[:length]
+	return nil
 }
 
 func (si *bufferedIterator) Error() error { return si.err }

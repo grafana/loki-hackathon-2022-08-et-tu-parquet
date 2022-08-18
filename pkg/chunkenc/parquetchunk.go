@@ -108,6 +108,7 @@ func writeParquet(w io.Writer, c Chunk, labels labels.Labels) error {
 			Tag:  `parquet:",snappy"`,
 		},
 	}
+	// TODO we should sort these for consistent ordering
 	mc := c.MetadataColumns()
 	for k, v := range mc {
 		fields = append(fields, reflect.StructField{Name: k, Type: v, Tag: `parquet:",snappy"`})
@@ -377,18 +378,19 @@ func (p *parquetSampleIterator) Next() bool {
 		row := make([]LokiBaseRowType, 1, 1)
 		num, err := p.reader.Read(row)
 		if num > 0 {
-			//TODO memchunk adds additional length to cover the timestamp, not sure what to add here for parquet files
+			//TODO memchunk adds additional length to cover the timestamp, not sure what to add here for parquet files, we should also add the metadata length here too
 			p.stats.AddDecompressedBytes(int64(len(row[0].Entry)))
 			p.stats.AddDecompressedLines(1)
 
 			currLine := []byte(row[0].Entry)
 			currTs := row[0].Timestamp
 
-			val, labels, ok := p.extractor.Process(currTs, currLine)
+			val, lbls, ok := p.extractor.Process(currTs, currLine)
 			if !ok {
 				continue
 			}
-			p.currLabels = labels
+
+			p.currLabels = lbls
 			p.cur.Value = val
 			p.cur.Hash = xxhash.Sum64(currLine)
 			p.cur.Timestamp = currTs
@@ -458,7 +460,7 @@ func (p *parquetEntryIterator) Next() bool {
 		num, err := p.reader.ReadRows(row)
 		//num, err := p.reader.Read(row)
 		if num > 0 {
-			//TODO memchunk adds additional length to cover the timestamp, not sure what to add here for parquet files
+			//TODO memchunk adds additional length to cover the timestamp, not sure what to add here for parquet files, we should also add the metadata length here too
 			p.stats.AddDecompressedBytes(int64(len(row[0][1].Bytes())))
 			p.stats.AddDecompressedLines(1)
 
