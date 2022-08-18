@@ -68,7 +68,8 @@ type unorderedHeadBlock struct {
 
 func newUnorderedHeadBlock() *unorderedHeadBlock {
 	return &unorderedHeadBlock{
-		rt: rangetree.New(1),
+		rt:      rangetree.New(1),
+		columns: map[string]reflect.Type{},
 	}
 }
 
@@ -111,6 +112,8 @@ func (e *nsEntries) ValueAtDimension(_ uint64) int64 {
 }
 
 func (hb *unorderedHeadBlock) Append(entry *logproto.Entry) error {
+
+	entry.Metadata = map[string]string{"test1": "val1", "test2": "val2"}
 	// This is an allocation hack. The rangetree lib does not
 	// support the ability to pass a "mutate" function during an insert
 	// and instead will displace any existing entry at the specified timestamp.
@@ -377,6 +380,24 @@ func (hb *unorderedHeadBlock) Serialise(pool WriterPool) ([]byte, error) {
 			inBuf.Write(encBuf[:n])
 
 			inBuf.WriteString(entry.Line)
+
+			// TODO this needs to wrapped behind a new chunk format however the format isn't wired through to the block so skipping this for now
+			// Write the number of key-value pairs
+			n = binary.PutUvarint(encBuf, uint64(len(entry.Metadata)))
+			inBuf.Write(encBuf[:n])
+
+			// Iterate over the key value pairs
+			for k, v := range entry.Metadata {
+				// Write the length of the key and the key
+				n = binary.PutUvarint(encBuf, uint64(len(k)))
+				inBuf.Write(encBuf[:n])
+				inBuf.WriteString(k)
+
+				// Write the length of the value and the value
+				n = binary.PutUvarint(encBuf, uint64(len(v)))
+				inBuf.Write(encBuf[:n])
+				inBuf.WriteString(v)
+			}
 			return nil
 		},
 	)
@@ -504,7 +525,7 @@ func (hb *unorderedHeadBlock) LoadBytes(b []byte) error {
 		ts := db.varint64()
 		lineLn := db.uvarint()
 		line := string(db.bytes(lineLn))
-		// TODO need to read metadata here
+		// TODO need to read metadata here as well as populate the global column map
 		if err := hb.Append(&logproto.Entry{Timestamp: time.Unix(0, ts), Line: line}); err != nil {
 			return err
 		}
@@ -518,6 +539,7 @@ func (hb *unorderedHeadBlock) LoadBytes(b []byte) error {
 }
 
 func (hb *unorderedHeadBlock) MetadataColumns() map[string]reflect.Type {
+	//FIXME this gets reset which is no good...
 	return hb.columns
 }
 

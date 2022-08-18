@@ -161,7 +161,7 @@ func (hb *headBlock) Reset() {
 func (hb *headBlock) Bounds() (int64, int64) { return hb.mint, hb.maxt }
 
 func (hb *headBlock) Append(e *logproto.Entry) error {
-	//TODO support metadata in ordered headblock
+	//TODO support metadata in ordered headblock by creating a map of all the keys seen like we did in unordered
 	ts := e.Timestamp.UnixNano()
 	line := e.Line
 	if !hb.IsEmpty() && hb.maxt > ts {
@@ -198,7 +198,23 @@ func (hb *headBlock) Serialise(pool WriterPool) ([]byte, error) {
 
 		inBuf.WriteString(logEntry.s)
 
-		//TODO need to start writing metadata here, I think we can write a number for # of key values, then a length and a string for the key, then a length and a string for a value
+		// TODO this needs to wrapped behind a new chunk format however the format isn't wired through to the block so skipping this for now
+		// Write the number of key-value pairs
+		n = binary.PutUvarint(encBuf, uint64(len(logEntry.m)))
+		inBuf.Write(encBuf[:n])
+
+		// Iterate over the key value pairs
+		for k, v := range logEntry.m {
+			// Write the length of the key and the key
+			n = binary.PutUvarint(encBuf, uint64(len(k)))
+			inBuf.Write(encBuf[:n])
+			inBuf.WriteString(k)
+
+			// Write the length of the value and the value
+			n = binary.PutUvarint(encBuf, uint64(len(v)))
+			inBuf.Write(encBuf[:n])
+			inBuf.WriteString(v)
+		}
 	}
 
 	if _, err := compressedWriter.Write(inBuf.Bytes()); err != nil {
@@ -258,6 +274,7 @@ func (hb *headBlock) CheckpointTo(w io.Writer) error {
 	}
 	eb.reset()
 
+	// TODO this also needs to write the metadata
 	for _, entry := range hb.entries {
 		eb.putVarint64(entry.t)
 		eb.putUvarint(len(entry.s))
@@ -302,6 +319,7 @@ func (hb *headBlock) LoadBytes(b []byte) error {
 	}
 
 	hb.entries = make([]entry, ln)
+	// TODO this also needs to handle metadata
 	for i := 0; i < ln && db.err() == nil; i++ {
 		var entry entry
 		entry.t = db.varint64()
@@ -464,6 +482,7 @@ func (c *MemChunk) BytesSize() int {
 	}
 
 	// blocks
+	// TODO this needs to include metadata
 	for _, b := range c.blocks {
 		size += len(b.b) + crc32.Size // size + crc
 
@@ -766,7 +785,7 @@ func (c *MemChunk) cut() error {
 	})
 
 	c.cutBlockSize += len(b)
-
+	// TODO get the metadata colums out of here before resetting
 	c.head.Reset()
 	return nil
 }
@@ -1138,6 +1157,7 @@ type bufferedIterator struct {
 	buf      []byte // The buffer for a single entry.
 	currLine []byte // the current line, this is the same as the buffer but sliced the the line size.
 	currTs   int64
+	currMeta map[string]string
 
 	closed bool
 }
@@ -1165,7 +1185,7 @@ func (si *bufferedIterator) Next() bool {
 		si.bufReader = BufReaderPool.Get(si.reader)
 	}
 
-	ts, line, ok := si.moveNext()
+	ts, line, meta, ok := si.moveNext()
 	if !ok {
 		si.Close()
 		return false
@@ -1176,59 +1196,160 @@ func (si *bufferedIterator) Next() bool {
 
 	si.currTs = ts
 	si.currLine = line
+	si.currMeta = meta
 	return true
 }
 
 // moveNext moves the buffer to the next entry
-func (si *bufferedIterator) moveNext() (int64, []byte, bool) {
+func (si *bufferedIterator) moveNext() (int64, []byte, map[string]string, bool) {
 	ts, err := binary.ReadVarint(si.bufReader)
 	if err != nil {
 		if err != io.EOF {
 			si.err = err
 		}
-		return 0, nil, false
+		return 0, nil, nil, false
 	}
 
+	lineSize, err := si.readLength()
+	if err != nil {
+		si.err = err
+		return 0, nil, nil, false
+	}
+
+	//l, err := binary.ReadUvarint(si.bufReader)
+	//if err != nil {
+	//	if err != io.EOF {
+	//		si.err = err
+	//		return 0, nil, nil, false
+	//	}
+	//}
+	//lineSize := int(l)
+
+	if lineSize >= maxLineLength {
+		si.err = fmt.Errorf("line too long %d, maximum %d", lineSize, maxLineLength)
+		return 0, nil, nil, false
+	}
+
+	line, err := si.readString(lineSize)
+	if err != nil {
+		si.err = err
+		return 0, nil, nil, false
+	}
+
+	//// If the buffer is not yet initialize or too small, we get a new one.
+	//if si.buf == nil || lineSize > cap(si.buf) {
+	//	// in case of a replacement we replace back the buffer in the pool
+	//	if si.buf != nil {
+	//		BytesBufferPool.Put(si.buf)
+	//	}
+	//	si.buf = BytesBufferPool.Get(lineSize).([]byte)
+	//	if lineSize > cap(si.buf) {
+	//		si.err = fmt.Errorf("could not get a line buffer of size %d, actual %d", lineSize, cap(si.buf))
+	//		return 0, nil, nil, false
+	//	}
+	//}
+	//// Then process reading the line.
+	//n, err := si.bufReader.Read(si.buf[:lineSize])
+	//if err != nil && err != io.EOF {
+	//	si.err = err
+	//	return 0, nil, nil, false
+	//}
+	//for n < lineSize {
+	//	r, err := si.bufReader.Read(si.buf[n:lineSize])
+	//	if err != nil && err != io.EOF {
+	//		si.err = err
+	//		return 0, nil, nil, false
+	//	}
+	//	n += r
+	//}
+	//line := si.buf[:lineSize]
+
+	// TODO this should be wrapped in a new chunk format
+
+	// Read number of metadata key value pairs
 	l, err := binary.ReadUvarint(si.bufReader)
 	if err != nil {
 		if err != io.EOF {
 			si.err = err
-			return 0, nil, false
+			return 0, nil, nil, false
 		}
 	}
-	lineSize := int(l)
 
-	if lineSize >= maxLineLength {
-		si.err = fmt.Errorf("line too long %d, maximum %d", lineSize, maxLineLength)
-		return 0, nil, false
+	meta := make(map[string]string, int(l))
+
+	// Iterate over the key value pairs and read them
+	for i := uint64(0); i < l; i++ {
+		// Read Key
+		length, err := si.readLength()
+		if err != nil {
+			si.err = err
+			return 0, nil, nil, false
+		}
+		k, err := si.readString(length)
+		if err != nil {
+			si.err = err
+			return 0, nil, nil, false
+		}
+
+		// Read val
+		length, err = si.readLength()
+		if err != nil {
+			si.err = err
+			return 0, nil, nil, false
+		}
+		v, err := si.readString(length)
+		if err != nil {
+			si.err = err
+			return 0, nil, nil, false
+		}
+		meta[string(k)] = string(v)
 	}
+
+	return ts, line, meta, true
+}
+
+func (si *bufferedIterator) readLength() (int, error) {
+	ln, err := binary.ReadUvarint(si.bufReader)
+	if err != nil {
+		if err != io.EOF {
+			return 0, err
+		}
+	}
+	return int(ln), nil
+}
+
+func (si *bufferedIterator) readString(length int) ([]byte, error) {
+	//ln, err := binary.ReadUvarint(si.bufReader)
+	//if err != nil {
+	//	if err != io.EOF {
+	//		return nil, err
+	//	}
+	//}
+	//length := int(ln)
 	// If the buffer is not yet initialize or too small, we get a new one.
-	if si.buf == nil || lineSize > cap(si.buf) {
+	if si.buf == nil || length > cap(si.buf) {
 		// in case of a replacement we replace back the buffer in the pool
 		if si.buf != nil {
 			BytesBufferPool.Put(si.buf)
 		}
-		si.buf = BytesBufferPool.Get(lineSize).([]byte)
-		if lineSize > cap(si.buf) {
-			si.err = fmt.Errorf("could not get a line buffer of size %d, actual %d", lineSize, cap(si.buf))
-			return 0, nil, false
+		si.buf = BytesBufferPool.Get(length).([]byte)
+		if length > cap(si.buf) {
+			return nil, fmt.Errorf("could not get a line buffer of size %d, actual %d", length, cap(si.buf))
 		}
 	}
 	// Then process reading the line.
-	n, err := si.bufReader.Read(si.buf[:lineSize])
+	n, err := si.bufReader.Read(si.buf[:length])
 	if err != nil && err != io.EOF {
-		si.err = err
-		return 0, nil, false
+		return nil, err
 	}
-	for n < lineSize {
-		r, err := si.bufReader.Read(si.buf[n:lineSize])
+	for n < length {
+		r, err := si.bufReader.Read(si.buf[n:length])
 		if err != nil && err != io.EOF {
-			si.err = err
-			return 0, nil, false
+			return nil, err
 		}
 		n += r
 	}
-	return ts, si.buf[:lineSize], true
+	return si.buf[:length], nil
 }
 
 func (si *bufferedIterator) Error() error { return si.err }
@@ -1289,6 +1410,7 @@ func (e *entryBufferedIterator) Next() bool {
 		}
 		e.cur.Timestamp = time.Unix(0, e.currTs)
 		e.cur.Line = string(newLine)
+		e.cur.Metadata = e.currMeta
 		e.currLabels = lbs
 		return true
 	}

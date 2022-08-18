@@ -127,6 +127,13 @@ func writeParquet(w io.Writer, c Chunk, labels labels.Labels) error {
 			//derefRow := dereference(row)
 			row.Elem().FieldByName("Timestamp").Set(reflect.ValueOf(itr.Entry().Timestamp.UnixNano()))
 			row.Elem().FieldByName("Line").Set(reflect.ValueOf(itr.Entry().Line))
+
+			for c := range c.MetadataColumns() {
+				// TODO check types here
+				// TODO check that the column exists in the metadata
+				row.Elem().FieldByName(c).Set(reflect.ValueOf(itr.Entry().Metadata[c]))
+			}
+
 			//row := make(parquet.Row, 2)
 			//row[0] = parquet.ValueOf(itr.Entry().Timestamp.UnixNano())
 			//row[1] = parquet.ValueOf(itr.Entry().Line)
