@@ -276,6 +276,9 @@ Outer:
 	if b.err != "" {
 		buf = append(buf, labels.Label{Name: logqlmodel.ErrorLabel, Value: b.err})
 	}
+	if b.errDetails != "" {
+		buf = append(buf, labels.Label{Name: logqlmodel.ErrorDetailsLabel, Value: b.errDetails})
+	}
 
 	return buf
 }

@@ -204,6 +204,8 @@ func (hb *headBlock) Serialise(pool WriterPool) ([]byte, error) {
 
 		// TODO this needs to wrapped behind a new chunk format however the format isn't wired through to the block so skipping this for now
 		// Write the number of key-value pairs
+		// Note, if we really want to support metadata in our current chunk format we may want to look at interning strings for keys and values
+		// A lot of this will hopefully get compressed away by our compression though, so maybe it's not worth it?
 		n = binary.PutUvarint(encBuf, uint64(len(logEntry.m)))
 		inBuf.Write(encBuf[:n])
 
@@ -1056,7 +1058,7 @@ func (hb *headBlock) Iterator(ctx context.Context, direction logproto.Direction,
 			return
 		}
 		stats.AddHeadChunkBytes(int64(len(e.s)))
-		newLine, parsedLbs, matches := pipeline.ProcessString(e.t, e.s)
+		newLine, parsedLbs, matches := pipeline.ProcessString(e.t, e.s, e.m)
 		if !matches {
 			return
 		}
@@ -1108,7 +1110,7 @@ func (hb *headBlock) SampleIterator(ctx context.Context, mint, maxt int64, extra
 
 	for _, e := range hb.entries {
 		stats.AddHeadChunkBytes(int64(len(e.s)))
-		value, parsedLabels, ok := extractor.ProcessString(e.t, e.s)
+		value, parsedLabels, ok := extractor.ProcessString(e.t, e.s, e.m)
 		if !ok {
 			continue
 		}
@@ -1418,7 +1420,7 @@ func (e *entryBufferedIterator) StreamHash() uint64 { return e.pipeline.BaseLabe
 
 func (e *entryBufferedIterator) Next() bool {
 	for e.bufferedIterator.Next() {
-		newLine, lbs, matches := e.pipeline.Process(e.currTs, e.currLine)
+		newLine, lbs, matches := e.pipeline.Process(e.currTs, e.currLine, e.currMeta)
 		if !matches {
 			continue
 		}
@@ -1450,7 +1452,7 @@ type sampleBufferedIterator struct {
 
 func (e *sampleBufferedIterator) Next() bool {
 	for e.bufferedIterator.Next() {
-		val, labels, ok := e.extractor.Process(e.currTs, e.currLine)
+		val, labels, ok := e.extractor.Process(e.currTs, e.currLine, e.currMeta)
 		if !ok {
 			continue
 		}

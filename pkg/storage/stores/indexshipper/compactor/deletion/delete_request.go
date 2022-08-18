@@ -39,6 +39,7 @@ func (d *DeleteRequest) SetQuery(logQL string) error {
 }
 
 // FilterFunction returns a filter function that returns true if the given line matches
+// TODO will this get metadata or does that need to be handled here also
 func (d *DeleteRequest) FilterFunction(labels labels.Labels) (filter.Func, error) {
 	if d.logSelectorExpr == nil {
 		err := d.SetQuery(d.Query)
@@ -59,7 +60,7 @@ func (d *DeleteRequest) FilterFunction(labels labels.Labels) (filter.Func, error
 
 	f := p.ForStream(labels).ProcessString
 	return func(s string) bool {
-		result, _, skip := f(0, s)
+		result, _, skip := f(0, s, nil)
 		if len(result) != 0 || skip {
 			d.Metrics.deletedLinesTotal.WithLabelValues(d.UserID).Inc()
 			d.DeletedLines++

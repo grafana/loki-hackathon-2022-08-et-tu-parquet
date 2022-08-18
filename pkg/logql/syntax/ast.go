@@ -134,7 +134,7 @@ func (e *MatchersExpr) String() string {
 }
 
 func (e *MatchersExpr) Pipeline() (log.Pipeline, error) {
-	return log.NewNoopPipeline(), nil
+	return log.NewMetadataPipeline(), nil
 }
 
 func (e *MatchersExpr) HasFilter() bool {

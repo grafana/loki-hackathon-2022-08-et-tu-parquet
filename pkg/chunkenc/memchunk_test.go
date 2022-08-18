@@ -677,10 +677,10 @@ func BenchmarkWrite(b *testing.B) {
 type nomatchPipeline struct{}
 
 func (nomatchPipeline) BaseLabels() log.LabelsResult { return log.EmptyLabelsResult }
-func (nomatchPipeline) Process(_ int64, line []byte) ([]byte, log.LabelsResult, bool) {
+func (nomatchPipeline) Process(_ int64, line []byte, _ map[string]string) ([]byte, log.LabelsResult, bool) {
 	return line, nil, false
 }
-func (nomatchPipeline) ProcessString(_ int64, line string) (string, log.LabelsResult, bool) {
+func (nomatchPipeline) ProcessString(_ int64, line string, _ map[string]string) (string, log.LabelsResult, bool) {
 	return line, nil, false
 }
 
@@ -809,7 +809,8 @@ func BenchmarkHeadBlockIterator(b *testing.B) {
 			h := headBlock{}
 
 			for i := 0; i < j; i++ {
-				if err := h.Append(int64(i), "this is the append string"); err != nil {
+				// FIXME hacked this to fix the error when adding metadata but not sure if we should build a new entry for each iteration here?
+				if err := h.Append(&logproto.Entry{time.Unix(0, int64(i)), "this is the append string", map[string]string{}}); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -833,7 +834,8 @@ func BenchmarkHeadBlockSampleIterator(b *testing.B) {
 			h := headBlock{}
 
 			for i := 0; i < j; i++ {
-				if err := h.Append(int64(i), "this is the append string"); err != nil {
+				// FIXME hacked this to fix the error when adding metadata but not sure if we should build a new entry for each iteration here?
+				if err := h.Append(&logproto.Entry{time.Unix(0, int64(i)), "this is the append string", map[string]string{}}); err != nil {
 					b.Fatal(err)
 				}
 			}

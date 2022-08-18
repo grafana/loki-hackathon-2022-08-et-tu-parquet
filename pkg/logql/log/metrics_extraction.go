@@ -34,8 +34,8 @@ type SampleExtractor interface {
 // A StreamSampleExtractor never mutate the received line.
 type StreamSampleExtractor interface {
 	BaseLabels() LabelsResult
-	Process(ts int64, line []byte) (float64, LabelsResult, bool)
-	ProcessString(ts int64, line string) (float64, LabelsResult, bool)
+	Process(ts int64, line []byte, meta map[string]string) (float64, LabelsResult, bool)
+	ProcessString(ts int64, line string, meta map[string]string) (float64, LabelsResult, bool)
 }
 
 type lineSampleExtractor struct {
@@ -80,12 +80,15 @@ type streamLineSampleExtractor struct {
 	builder *LabelsBuilder
 }
 
-func (l *streamLineSampleExtractor) Process(ts int64, line []byte) (float64, LabelsResult, bool) {
+func (l *streamLineSampleExtractor) Process(ts int64, line []byte, meta map[string]string) (float64, LabelsResult, bool) {
 	// short circuit.
 	if l.Stage == NoopStage {
 		return l.LineExtractor(line), l.builder.GroupedLabels(), true
 	}
 	l.builder.Reset()
+	for k, v := range meta {
+		l.builder.Set(k, v)
+	}
 	line, ok := l.Stage.Process(ts, line, l.builder)
 	if !ok {
 		return 0, nil, false
@@ -93,9 +96,9 @@ func (l *streamLineSampleExtractor) Process(ts int64, line []byte) (float64, Lab
 	return l.LineExtractor(line), l.builder.GroupedLabels(), true
 }
 
-func (l *streamLineSampleExtractor) ProcessString(ts int64, line string) (float64, LabelsResult, bool) {
+func (l *streamLineSampleExtractor) ProcessString(ts int64, line string, meta map[string]string) (float64, LabelsResult, bool) {
 	// unsafe get bytes since we have the guarantee that the line won't be mutated.
-	return l.Process(ts, unsafeGetBytes(line))
+	return l.Process(ts, unsafeGetBytes(line), meta)
 }
 
 func (l *streamLineSampleExtractor) BaseLabels() LabelsResult { return l.builder.currentResult }
@@ -168,9 +171,12 @@ func (l *labelSampleExtractor) ForStream(labels labels.Labels) StreamSampleExtra
 	return res
 }
 
-func (l *streamLabelSampleExtractor) Process(ts int64, line []byte) (float64, LabelsResult, bool) {
+func (l *streamLabelSampleExtractor) Process(ts int64, line []byte, meta map[string]string) (float64, LabelsResult, bool) {
 	// Apply the pipeline first.
 	l.builder.Reset()
+	for k, v := range meta {
+		l.builder.Set(k, v)
+	}
 	line, ok := l.preStage.Process(ts, line, l.builder)
 	if !ok {
 		return 0, nil, false
@@ -198,9 +204,9 @@ func (l *streamLabelSampleExtractor) Process(ts int64, line []byte) (float64, La
 	return v, l.builder.GroupedLabels(), true
 }
 
-func (l *streamLabelSampleExtractor) ProcessString(ts int64, line string) (float64, LabelsResult, bool) {
+func (l *streamLabelSampleExtractor) ProcessString(ts int64, line string, meta map[string]string) (float64, LabelsResult, bool) {
 	// unsafe get bytes since we have the guarantee that the line won't be mutated.
-	return l.Process(ts, unsafeGetBytes(line))
+	return l.Process(ts, unsafeGetBytes(line), meta)
 }
 
 func (l *streamLabelSampleExtractor) BaseLabels() LabelsResult { return l.builder.currentResult }
@@ -247,34 +253,34 @@ func (sp *filteringStreamExtractor) BaseLabels() LabelsResult {
 	return sp.extractor.BaseLabels()
 }
 
-func (sp *filteringStreamExtractor) Process(ts int64, line []byte) (float64, LabelsResult, bool) {
+func (sp *filteringStreamExtractor) Process(ts int64, line []byte, meta map[string]string) (float64, LabelsResult, bool) {
 	for _, filter := range sp.filters {
 		if ts < filter.start || ts > filter.end {
 			continue
 		}
 
-		_, _, matches := filter.pipeline.Process(ts, line)
+		_, _, matches := filter.pipeline.Process(ts, line, meta)
 		if matches { //When the filter matches, don't run the next step
 			return 0, nil, false
 		}
 	}
 
-	return sp.extractor.Process(ts, line)
+	return sp.extractor.Process(ts, line, meta)
 }
 
-func (sp *filteringStreamExtractor) ProcessString(ts int64, line string) (float64, LabelsResult, bool) {
+func (sp *filteringStreamExtractor) ProcessString(ts int64, line string, meta map[string]string) (float64, LabelsResult, bool) {
 	for _, filter := range sp.filters {
 		if ts < filter.start || ts > filter.end {
 			continue
 		}
 
-		_, _, matches := filter.pipeline.ProcessString(ts, line)
+		_, _, matches := filter.pipeline.ProcessString(ts, line, meta)
 		if matches { //When the filter matches, don't run the next step
 			return 0, nil, false
 		}
 	}
 
-	return sp.extractor.ProcessString(ts, line)
+	return sp.extractor.ProcessString(ts, line, meta)
 }
 
 func convertFloat(v string) (float64, error) {

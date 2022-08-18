@@ -1,6 +1,7 @@
 package loghttp
 
 import (
+	"fmt"
 	"strconv"
 	"time"
 	"unsafe"
@@ -18,6 +19,7 @@ func init() {
 type Entry struct {
 	Timestamp time.Time
 	Line      string
+	Metadata  map[string]string
 }
 
 func (e *Entry) UnmarshalJSON(data []byte) error {
@@ -46,6 +48,8 @@ func (e *Entry) UnmarshalJSON(data []byte) error {
 				return
 			}
 			e.Line = v
+		case 2: // metadata
+			fmt.Println("FML")
 		}
 		i++
 	})

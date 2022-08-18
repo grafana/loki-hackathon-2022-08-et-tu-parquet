@@ -21,8 +21,8 @@ type StreamPipeline interface {
 	BaseLabels() LabelsResult
 	// Process processes a log line and returns the transformed line and the labels.
 	// The buffer returned for the log line can be reused on subsequent calls to Process and therefore must be copied.
-	Process(ts int64, line []byte) (resultLine []byte, resultLabels LabelsResult, matches bool)
-	ProcessString(ts int64, line string) (resultLine string, resultLabels LabelsResult, matches bool)
+	Process(ts int64, line []byte, meta map[string]string) (resultLine []byte, resultLabels LabelsResult, matches bool)
+	ProcessString(ts int64, line string, meta map[string]string) (resultLine string, resultLabels LabelsResult, matches bool)
 }
 
 // Stage is a single step of a Pipeline.
@@ -31,6 +31,47 @@ type StreamPipeline interface {
 type Stage interface {
 	Process(ts int64, line []byte, lbs *LabelsBuilder) ([]byte, bool)
 	RequiredLabelNames() []string
+}
+
+// NewMetadataPipeline creates a pipelines that processes metadata only.
+func NewMetadataPipeline() Pipeline {
+	return &metadataPipeline{
+		cache: map[uint64]*metadataStreamPipeline{},
+	}
+}
+
+type metadataPipeline struct {
+	cache map[uint64]*metadataStreamPipeline
+}
+
+type metadataStreamPipeline struct {
+	builder *LabelsBuilder
+}
+
+func (n metadataStreamPipeline) Process(_ int64, line []byte, meta map[string]string) ([]byte, LabelsResult, bool) {
+	n.builder.Reset()
+	for k, v := range meta {
+		n.builder.Set(k, v)
+	}
+	return line, n.builder.LabelsResult(), true
+}
+
+func (n metadataStreamPipeline) ProcessString(_ int64, line string, _ map[string]string) (string, LabelsResult, bool) {
+	return line, n.builder.LabelsResult(), true
+}
+
+func (n metadataStreamPipeline) BaseLabels() LabelsResult { return n.builder.LabelsResult() }
+
+func (n *metadataPipeline) ForStream(labels labels.Labels) StreamPipeline {
+	h := labels.Hash()
+	if cached, ok := n.cache[h]; ok {
+		return cached
+	}
+	b := NewBaseLabelsBuilder()
+	lb := b.ForLabels(labels, h)
+	sp := &metadataStreamPipeline{builder: lb}
+	n.cache[h] = sp
+	return sp
 }
 
 // NewNoopPipeline creates a pipelines that does not process anything and returns log streams as is.
@@ -54,11 +95,11 @@ type noopStreamPipeline struct {
 	LabelsResult
 }
 
-func (n noopStreamPipeline) Process(_ int64, line []byte) ([]byte, LabelsResult, bool) {
+func (n noopStreamPipeline) Process(_ int64, line []byte, meta map[string]string) ([]byte, LabelsResult, bool) {
 	return line, n.LabelsResult, true
 }
 
-func (n noopStreamPipeline) ProcessString(_ int64, line string) (string, LabelsResult, bool) {
+func (n noopStreamPipeline) ProcessString(_ int64, line string, _ map[string]string) (string, LabelsResult, bool) {
 	return line, n.LabelsResult, true
 }
 
@@ -109,7 +150,7 @@ type pipeline struct {
 // NewPipeline creates a new pipeline for a given set of stages.
 func NewPipeline(stages []Stage) Pipeline {
 	if len(stages) == 0 {
-		return NewNoopPipeline()
+		return NewMetadataPipeline()
 	}
 	return &pipeline{
 		stages:          stages,
@@ -137,9 +178,12 @@ func (p *pipeline) ForStream(labels labels.Labels) StreamPipeline {
 	return res
 }
 
-func (p *streamPipeline) Process(ts int64, line []byte) ([]byte, LabelsResult, bool) {
+func (p *streamPipeline) Process(ts int64, line []byte, meta map[string]string) ([]byte, LabelsResult, bool) {
 	var ok bool
 	p.builder.Reset()
+	for k, v := range meta {
+		p.builder.Set(k, v)
+	}
 	for _, s := range p.stages {
 		line, ok = s.Process(ts, line, p.builder)
 		if !ok {
@@ -149,9 +193,9 @@ func (p *streamPipeline) Process(ts int64, line []byte) ([]byte, LabelsResult, b
 	return line, p.builder.LabelsResult(), true
 }
 
-func (p *streamPipeline) ProcessString(ts int64, line string) (string, LabelsResult, bool) {
+func (p *streamPipeline) ProcessString(ts int64, line string, meta map[string]string) (string, LabelsResult, bool) {
 	// Stages only read from the line.
-	lb, lr, ok := p.Process(ts, unsafeGetBytes(line))
+	lb, lr, ok := p.Process(ts, unsafeGetBytes(line), meta)
 	// but the returned line needs to be copied.
 	return string(lb), lr, ok
 }
@@ -226,34 +270,34 @@ func (sp *filteringStreamPipeline) BaseLabels() LabelsResult {
 	return sp.pipeline.BaseLabels()
 }
 
-func (sp *filteringStreamPipeline) Process(ts int64, line []byte) ([]byte, LabelsResult, bool) {
+func (sp *filteringStreamPipeline) Process(ts int64, line []byte, meta map[string]string) ([]byte, LabelsResult, bool) {
 	for _, filter := range sp.filters {
 		if ts < filter.start || ts > filter.end {
 			continue
 		}
 
-		_, _, matches := filter.pipeline.Process(ts, line)
+		_, _, matches := filter.pipeline.Process(ts, line, meta)
 		if matches { // When the filter matches, don't run the next step
 			return nil, nil, false
 		}
 	}
 
-	return sp.pipeline.Process(ts, line)
+	return sp.pipeline.Process(ts, line, meta)
 }
 
-func (sp *filteringStreamPipeline) ProcessString(ts int64, line string) (string, LabelsResult, bool) {
+func (sp *filteringStreamPipeline) ProcessString(ts int64, line string, meta map[string]string) (string, LabelsResult, bool) {
 	for _, filter := range sp.filters {
 		if ts < filter.start || ts > filter.end {
 			continue
 		}
 
-		_, _, matches := filter.pipeline.ProcessString(ts, line)
+		_, _, matches := filter.pipeline.ProcessString(ts, line, meta)
 		if matches { // When the filter matches, don't run the next step
 			return "", nil, false
 		}
 	}
 
-	return sp.pipeline.ProcessString(ts, line)
+	return sp.pipeline.ProcessString(ts, line, meta)
 }
 
 // ReduceStages reduces multiple stages into one.

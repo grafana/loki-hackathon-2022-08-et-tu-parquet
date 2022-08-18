@@ -259,7 +259,7 @@ func (hb *unorderedHeadBlock) Iterator(
 		maxt,
 		func(entry *logproto.Entry) error {
 			ts := entry.Timestamp.UnixNano()
-			newLine, parsedLbs, matches := pipeline.ProcessString(ts, entry.Line)
+			newLine, parsedLbs, matches := pipeline.ProcessString(ts, entry.Line, entry.Metadata)
 			if !matches {
 				return nil
 			}
@@ -311,7 +311,7 @@ func (hb *unorderedHeadBlock) SampleIterator(
 		func(entry *logproto.Entry) error {
 			ts := entry.Timestamp.UnixNano()
 			line := entry.Line
-			value, parsedLabels, ok := extractor.ProcessString(ts, line)
+			value, parsedLabels, ok := extractor.ProcessString(ts, line, entry.Metadata)
 			if !ok {
 				return nil
 			}

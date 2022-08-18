@@ -341,31 +341,41 @@ func (p parquetBlock) Entries() int {
 }
 
 func (p parquetBlock) Iterator(ctx context.Context, pipeline log.StreamPipeline) iter.EntryIterator {
-	return newparquetEntryIterator(ctx, pipeline, &p)
+	return newparquetEntryIterator(ctx, pipeline, p.rowGroup)
 }
 
 func (p parquetBlock) SampleIterator(ctx context.Context, extractor log.StreamSampleExtractor) iter.SampleIterator {
-	return newparquetSampleIterator(ctx, extractor, &p)
+	return newparquetSampleIterator(ctx, extractor, p.rowGroup)
 }
 
 type parquetSampleIterator struct {
 	extractor log.StreamSampleExtractor
 	stats     *stats.Context
-	reader    *parquet.GenericReader[LokiBaseRowType]
+	reader    *parquet.Reader
 
 	cur        logproto.Sample
 	currLabels log.LabelsResult
 
 	err    error
 	closed bool
+
+	columnMap map[int]string
 }
 
-func newparquetSampleIterator(ctx context.Context, extractor log.StreamSampleExtractor, block *parquetBlock) iter.SampleIterator {
+func newparquetSampleIterator(ctx context.Context, extractor log.StreamSampleExtractor, rg parquet.RowGroup) iter.SampleIterator {
+	reader := parquet.NewRowGroupReader(rg)
+	columns := reader.Schema().Columns()
+	columnMap := make(map[int]string, len(columns))
+
+	for k, v := range columns {
+		columnMap[k] = v[0]
+	}
 
 	return &parquetSampleIterator{
 		stats:     stats.FromContext(ctx),
 		extractor: extractor,
-		reader:    parquet.NewGenericRowGroupReader[LokiBaseRowType](block.rowGroup),
+		reader:    reader,
+		columnMap: columnMap,
 	}
 }
 
@@ -375,17 +385,28 @@ func (p *parquetSampleIterator) Next() bool {
 	}
 	for {
 		//TODO we should read in batches here instead of one at a time I think.
-		row := make([]LokiBaseRowType, 1, 1)
-		num, err := p.reader.Read(row)
+		row := make([]parquet.Row, 1, 1)
+		num, err := p.reader.ReadRows(row)
 		if num > 0 {
 			//TODO memchunk adds additional length to cover the timestamp, not sure what to add here for parquet files, we should also add the metadata length here too
-			p.stats.AddDecompressedBytes(int64(len(row[0].Entry)))
+			p.stats.AddDecompressedBytes(int64(len(row[0][1].Bytes())))
 			p.stats.AddDecompressedLines(1)
 
-			currLine := []byte(row[0].Entry)
-			currTs := row[0].Timestamp
+			meta := make(map[string]string, len(p.columnMap)-2)
+			for k, v := range p.columnMap {
+				// Index positions 0 and 1 are the timestamp and log line
+				if k == 0 || k == 1 {
+					continue
+				}
+				// The key for the metadata map will be the column name from our map of columns
+				// The value will be the entry at column index pulled from the map
+				meta[v] = row[0][k].String()
+			}
 
-			val, lbls, ok := p.extractor.Process(currTs, currLine)
+			currLine := row[0][1].Bytes()
+			currTs := row[0][0].Int64()
+
+			val, lbls, ok := p.extractor.Process(currTs, currLine, meta)
 			if !ok {
 				continue
 			}
@@ -438,14 +459,25 @@ type parquetEntryIterator struct {
 
 	err    error
 	closed bool
+
+	// Maps the column index to the column name
+	columnMap map[int]string
 }
 
-func newparquetEntryIterator(ctx context.Context, pipeline log.StreamPipeline, block *parquetBlock) iter.EntryIterator {
+func newparquetEntryIterator(ctx context.Context, pipeline log.StreamPipeline, rg parquet.RowGroup) iter.EntryIterator {
+	reader := parquet.NewRowGroupReader(rg)
+	columns := reader.Schema().Columns()
+	columnMap := make(map[int]string, len(columns))
+
+	for k, v := range columns {
+		columnMap[k] = v[0]
+	}
 
 	return &parquetEntryIterator{
-		stats:    stats.FromContext(ctx),
-		pipeline: pipeline,
-		reader:   parquet.NewRowGroupReader(block.rowGroup),
+		stats:     stats.FromContext(ctx),
+		pipeline:  pipeline,
+		reader:    reader,
+		columnMap: columnMap,
 	}
 }
 
@@ -464,15 +496,27 @@ func (p *parquetEntryIterator) Next() bool {
 			p.stats.AddDecompressedBytes(int64(len(row[0][1].Bytes())))
 			p.stats.AddDecompressedLines(1)
 
-			columns := p.reader.Schema().Columns()
-			fmt.Println(columns)
+			meta := make(map[string]string, len(p.columnMap)-2)
+			for k, v := range p.columnMap {
+				// Index positions 0 and 1 are the timestamp and log line
+				if k == 0 || k == 1 {
+					continue
+				}
+				// The key for the metadata map will be the column name from our map of columns
+				// The value will be the entry at column index pulled from the map
+				meta[v] = row[0][k].String()
+			}
 
-			newLine, lbs, matches := p.pipeline.Process(row[0][0].Int64(), row[0][1].Bytes())
+			ts := row[0][0].Int64()
+			line := row[0][1].Bytes()
+
+			newLine, lbs, matches := p.pipeline.Process(ts, line, meta)
 			if !matches {
 				continue
 			}
-			p.cur.Timestamp = time.Unix(0, row[0][0].Int64())
+			p.cur.Timestamp = time.Unix(0, ts)
 			p.cur.Line = string(newLine)
+			p.cur.Metadata = meta
 			p.currLabels = lbs
 			return true
 		}
