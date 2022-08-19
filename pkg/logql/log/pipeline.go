@@ -56,7 +56,11 @@ func (n metadataStreamPipeline) Process(_ int64, line []byte, meta map[string]st
 	return line, n.builder.LabelsResult(), true
 }
 
-func (n metadataStreamPipeline) ProcessString(_ int64, line string, _ map[string]string) (string, LabelsResult, bool) {
+func (n metadataStreamPipeline) ProcessString(_ int64, line string, meta map[string]string) (string, LabelsResult, bool) {
+	n.builder.Reset()
+	for k, v := range meta {
+		n.builder.Set(k, v)
+	}
 	return line, n.builder.LabelsResult(), true
 }
 

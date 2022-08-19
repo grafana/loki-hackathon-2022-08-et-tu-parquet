@@ -1,7 +1,7 @@
 package loghttp
 
 import (
-	"fmt"
+	"github.com/pkg/errors"
 	"strconv"
 	"time"
 	"unsafe"
@@ -29,7 +29,7 @@ func (e *Entry) UnmarshalJSON(data []byte) error {
 	)
 	_, err := jsonparser.ArrayEach(data, func(value []byte, t jsonparser.ValueType, _ int, _ error) {
 		// assert that both items in array are of type string
-		if t != jsonparser.String {
+		if t != jsonparser.String && t != jsonparser.Object {
 			parseError = jsonparser.MalformedStringError
 			return
 		}
@@ -49,7 +49,19 @@ func (e *Entry) UnmarshalJSON(data []byte) error {
 			}
 			e.Line = v
 		case 2: // metadata
-			fmt.Println("FML")
+			e.Metadata = map[string]string{}
+			err := jsonparser.ObjectEach(value, func(key []byte, value []byte, dataType jsonparser.ValueType, offset int) error {
+				if dataType != jsonparser.String {
+					return errors.New("metadata values must be strings")
+				}
+				e.Metadata[string(key)] = string(value)
+				return nil
+			})
+			if err != nil {
+				parseError = err
+				return
+			}
+
 		}
 		i++
 	})
