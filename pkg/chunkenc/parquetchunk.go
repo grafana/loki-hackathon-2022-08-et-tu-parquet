@@ -114,7 +114,6 @@ func writeParquet(w io.Writer, c Chunk, labels labels.Labels) error {
 		fields = append(fields, reflect.StructField{Name: k, Type: v, Tag: `parquet:",snappy"`})
 	}
 	typ := reflect.StructOf(fields)
-	//schema := parquet.PissSchemaOf(typ)
 	schema := parquet.SchemaOf(reflect.New(typ).Interface())
 	pw := parquet.NewWriter(w, schema, vers, lbls, uncompressedSize, startTime, endTime)
 	defer pw.Close()

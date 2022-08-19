@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net/http"
 	"time"
+	"unicode"
 
 	"github.com/dustin/go-humanize"
 	"github.com/go-kit/log"
@@ -120,7 +121,7 @@ func ParseRequest(logger log.Logger, userID string, r *http.Request, tenantsRete
 
 	mostRecentEntry := time.Unix(0, 0)
 
-	for _, s := range req.Streams {
+	for i, s := range req.Streams {
 		streamLabelsSize += int64(len(s.Labels))
 		var retentionHours string
 		if tenantsRetention != nil {
@@ -130,7 +131,7 @@ func ParseRequest(logger log.Logger, userID string, r *http.Request, tenantsRete
 			}
 			retentionHours = fmt.Sprintf("%d", int64(math.Floor(tenantsRetention.RetentionPeriodFor(userID, lbs).Hours())))
 		}
-		for _, e := range s.Entries {
+		for j, e := range s.Entries {
 			totalEntries++
 			entriesSize += int64(len(e.Line))
 			bytesIngested.WithLabelValues(userID, retentionHours).Add(float64(int64(len(e.Line))))
@@ -138,6 +139,17 @@ func ParseRequest(logger log.Logger, userID string, r *http.Request, tenantsRete
 			if e.Timestamp.After(mostRecentEntry) {
 				mostRecentEntry = e.Timestamp
 			}
+			// We need all of the metadata keys to be capitalized because of the dynamic struct generation later for parquet files
+			// TODO should we error instead of capitalizing here? we also need to validate that it follows the regex for prom label names
+			capMap := make(map[string]string, len(e.Metadata))
+			for k, v := range e.Metadata {
+				// TODO this seems expensive to copy every key to capitalize, maybe we can check somehow? maybe we can do unsafe copies?
+				r := []rune(k)
+				r[0] = unicode.ToUpper(r[0])
+				s := string(r)
+				capMap[s] = v
+			}
+			req.Streams[i].Entries[j].Metadata = capMap
 		}
 	}
 
