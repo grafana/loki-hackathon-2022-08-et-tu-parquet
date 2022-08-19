@@ -488,6 +488,23 @@ func (hb *unorderedHeadBlock) CheckpointTo(w io.Writer) error {
 			if err != nil {
 				return errors.Wrap(err, "write headblock entry line")
 			}
+
+			// TODO this should be gated by the chunk format??
+			eb.putUvarint(len(entry.Metadata))
+			for k, v := range entry.Metadata {
+				// TODO should we sort here rather than just ranging the map?
+				eb.putUvarint(len(k))
+				_, err := io.WriteString(w, k)
+				if err != nil {
+					return errors.Wrap(err, "write headblock metadata key")
+				}
+				eb.putUvarint(len(v))
+				_, err = io.WriteString(w, v)
+				if err != nil {
+					return errors.Wrap(err, "write headblock metadata val")
+				}
+			}
+
 			return nil
 		},
 	)
@@ -524,8 +541,17 @@ func (hb *unorderedHeadBlock) LoadBytes(b []byte) error {
 		ts := db.varint64()
 		lineLn := db.uvarint()
 		line := string(db.bytes(lineLn))
-		// TODO need to read metadata here as well as populate the global column map
-		if err := hb.Append(&logproto.Entry{Timestamp: time.Unix(0, ts), Line: line}); err != nil {
+		// TODO this should be gated by the chunk format??
+		metaPairs := db.uvarint()
+		meta := make(map[string]string, int(metaPairs))
+		for i := 0; i < metaPairs; i++ {
+			keyLen := db.uvarint()
+			key := string(db.bytes(keyLen))
+			valLen := db.uvarint()
+			val := string(db.bytes(valLen))
+			meta[key] = val
+		}
+		if err := hb.Append(&logproto.Entry{Timestamp: time.Unix(0, ts), Line: line, Metadata: meta}); err != nil {
 			return err
 		}
 	}
