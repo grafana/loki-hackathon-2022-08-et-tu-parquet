@@ -92,6 +92,17 @@ func (s stageProcessor) Run(in chan Entry) chan Entry {
 			s.inspector.inspect(s.Processor.Name(), before, e)
 		}
 
+		metaMap := make(map[string]string, len(e.Extracted))
+		for k, v := range e.Extracted {
+			val, err := getString(v)
+			if err != nil {
+				continue
+			}
+			metaMap[k] = val
+		}
+
+		e.Metadata = metaMap
+
 		return e
 	})
 }
